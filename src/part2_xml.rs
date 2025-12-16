@@ -186,6 +186,7 @@ impl HotelSearchProcessor {
         
         // TODO: need to handle errors better here
         // parse hotel data from xml
+        // parse cancellaton policies
         
         let mut current_hotel_id = String::new();
         let mut current_hotel_name = String::new();
@@ -196,12 +197,20 @@ impl HotelSearchProcessor {
         let mut current_room_desc = String::new();
         let mut current_search_token = String::new();
         let mut is_refundable = true;
+        let mut current_cancellation_policies = Vec::new();
         
         let mut in_hotel = false;
         let mut in_mealplan = false;
         let mut in_option = false;
         let mut in_room = false;
+        let mut in_cancel_penalty = false;
         let mut current_tag: Option<Vec<u8>> = None;
+        
+        let mut current_hours_before = 0;
+        let mut current_penalty_amount = 0.0;
+        let mut current_penalty_currency = String::new();
+        let mut current_penalty_type = String::new();
+        let mut current_deadline = String::new();
         
         loop {
             match reader.read_event_into(&mut buf) {
@@ -280,6 +289,29 @@ impl HotelSearchProcessor {
                                 }
                             }
                         }
+                        b"CancelPenalty" => {
+                            in_cancel_penalty = true;
+                            current_hours_before = 0;
+                            current_penalty_amount = 0.0;
+                            current_penalty_currency.clear();
+                            current_penalty_type.clear();
+                            current_deadline.clear();
+                        }
+                        b"Penalty" => {
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    match attr.key.as_ref() {
+                                        b"type" => {
+                                            current_penalty_type = String::from_utf8_lossy(&attr.value).to_string();
+                                        }
+                                        b"currency" => {
+                                            current_penalty_currency = String::from_utf8_lossy(&attr.value).to_string();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -287,6 +319,21 @@ impl HotelSearchProcessor {
                     if let Some(ref tag) = current_tag {
                         let text = e.unescape().unwrap_or_default().to_string();
                         match tag.as_slice() {
+                            b"HoursBefore" => {
+                                if in_cancel_penalty {
+                                    current_hours_before = text.parse().unwrap_or(0);
+                                }
+                            }
+                            b"Deadline" => {
+                                if in_cancel_penalty {
+                                    current_deadline = text;
+                                }
+                            }
+                            b"Penalty" => {
+                                if in_cancel_penalty {
+                                    current_penalty_amount = text.parse().unwrap_or(0.0);
+                                }
+                            }
                             b"Parameter" => {
                                 // will handle search_token later
                             }
@@ -296,6 +343,18 @@ impl HotelSearchProcessor {
                 }
                 Ok(Event::End(e)) => {
                     match e.name().as_ref() {
+                        b"CancelPenalty" => {
+                            if in_cancel_penalty {
+                                current_cancellation_policies.push(ProcessedCancellationPolicy {
+                                    deadline: current_deadline.clone(),
+                                    penalty_amount: current_penalty_amount,
+                                    currency: current_penalty_currency.clone(),
+                                    hours_before: current_hours_before,
+                                    penalty_type: current_penalty_type.clone(),
+                                });
+                            }
+                            in_cancel_penalty = false;
+                        }
                         b"Room" => {
                             if in_room && in_option && in_mealplan && in_hotel {
                                 if !current_hotel_id.is_empty() && !current_room_code.is_empty() {
@@ -309,7 +368,7 @@ impl HotelSearchProcessor {
                                             amount: current_price_amount,
                                             currency: current_price_currency.clone(),
                                         },
-                                        cancellation_policies: Vec::new(),
+                                        cancellation_policies: current_cancellation_policies.clone(),
                                         payment_type: "MerchantPay".to_string(),
                                         is_refundable,
                                         search_token: current_search_token.clone(),
@@ -319,6 +378,7 @@ impl HotelSearchProcessor {
                             in_room = false;
                             current_room_code.clear();
                             current_room_desc.clear();
+                            current_cancellation_policies.clear();
                         }
                         b"Hotel" => {
                             in_hotel = false;
