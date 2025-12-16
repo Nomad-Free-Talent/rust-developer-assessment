@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+type PendingFetches = Arc<Mutex<HashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>>;
+
 // Enhanced stats for the cache
 #[derive(Debug, Default, Clone)]
 pub struct CacheStats {
@@ -50,8 +52,9 @@ pub struct ShardedCache {
     config: CacheConfig,
     stats: Arc<RwLock<CacheStats>>,
     eviction_policy: Arc<RwLock<EvictionPolicy>>,
+    #[allow(dead_code)]
     cleanup_handle: Option<thread::JoinHandle<()>>,
-    pending_fetches: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>>,
+    pending_fetches: PendingFetches,
 }
 
 struct ShardData {
@@ -148,7 +151,7 @@ impl ShardedCache {
             .collect();
 
         for key in keys_to_remove {
-            if let Some(entry) = shard_guard.entries.remove(&key) {
+            if shard_guard.entries.remove(&key).is_some() {
                 shard_guard.lru_order.retain(|k| k != &key);
                 shard_guard.lfu_frequencies.remove(&key);
                 evicted_count += 1;
@@ -166,7 +169,7 @@ impl AvailabilityCache for ShardedCache {
             .map(|_| Arc::new(RwLock::new(ShardData::new())))
             .collect();
 
-        let shards_clone: Vec<_> = shards.iter().map(|s| Arc::clone(s)).collect();
+        let shards_clone: Vec<_> = shards.iter().map(Arc::clone).collect();
         let stats_clone = Arc::new(RwLock::new(CacheStats::default()));
         let stats_for_cleanup = Arc::clone(&stats_clone);
         let cleanup_interval = config.cleanup_interval_seconds;
@@ -306,7 +309,6 @@ impl AvailabilityCache for ShardedCache {
 
         if let Some(entry) = shard_guard.entries.get_mut(&key) {
             if entry.is_expired() {
-                drop(entry);
                 shard_guard.entries.remove(&key);
                 shard_guard.lru_order.retain(|k| k != &key);
                 stats_guard.expired_count += 1;
@@ -317,7 +319,6 @@ impl AvailabilityCache for ShardedCache {
             entry.access_count += 1;
             entry.last_accessed = Instant::now();
             let data = entry.data.clone();
-            drop(entry);
 
             // update lru order
             shard_guard.lru_order.retain(|k| k != &key);
@@ -368,7 +369,7 @@ impl AvailabilityCache for ShardedCache {
         *self.eviction_policy.write() = policy;
     }
 
-    fn prefetch(&self, keys: Vec<(String, String, String)>, ttl: Option<Duration>) -> usize {
+    fn prefetch(&self, keys: Vec<(String, String, String)>, _ttl: Option<Duration>) -> usize {
         let mut count = 0;
         for (hotel_id, check_in, check_out) in keys {
             let key = create_cache_key(&hotel_id, &check_in, &check_out);
@@ -400,9 +401,9 @@ impl AvailabilityCache for ShardedCache {
                     if parts.len() != 3 {
                         return false;
                     }
-                    let matches_hotel = hotel_id.map_or(true, |h| parts[0] == h);
-                    let matches_checkin = check_in.map_or(true, |c| parts[1] == c);
-                    let matches_checkout = check_out.map_or(true, |c| parts[2] == c);
+                    let matches_hotel = hotel_id.is_none_or(|h| parts[0] == h);
+                    let matches_checkin = check_in.is_none_or(|c| parts[1] == c);
+                    let matches_checkout = check_out.is_none_or(|c| parts[2] == c);
                     matches_hotel && matches_checkin && matches_checkout
                 })
                 .cloned()
@@ -505,7 +506,7 @@ pub trait AvailabilityCache: Send + Sync + 'static {
 
 // Helper function to create a cache key (you may modify this as needed)
 pub fn create_cache_key(hotel_id: &str, check_in: &str, check_out: &str) -> String {
-    format!("{}:{}:{}", hotel_id, check_in, check_out)
+    format!("{hotel_id}:{check_in}:{check_out}")
 }
 
 // Optional: Helper for calculating item size - implement if useful for your solution
@@ -651,7 +652,7 @@ mod tests {
         let large_data = vec![0; 250 * 1024];
 
         for i in 0..4 {
-            let hotel_id = format!("hotel{}", i);
+            let hotel_id = format!("hotel{i}");
             assert!(cache.store(
                 &hotel_id,
                 "2025-06-01",
@@ -730,7 +731,7 @@ mod tests {
 
         let medium_data = vec![0; 100 * 1024];
         for i in 0..50 {
-            let hotel_id = format!("hotel{}", i);
+            let hotel_id = format!("hotel{i}");
             cache.store(
                 &hotel_id,
                 "2025-06-01",
@@ -749,7 +750,7 @@ mod tests {
         assert!(cache.resize(20));
 
         for i in 50..100 {
-            let hotel_id = format!("hotel{}", i);
+            let hotel_id = format!("hotel{i}");
             cache.store(
                 &hotel_id,
                 "2025-06-01",

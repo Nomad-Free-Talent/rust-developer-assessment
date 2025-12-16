@@ -164,9 +164,9 @@ impl AvailabilityCache for ExampleCache {
                     return false;
                 }
 
-                let matches_hotel = hotel_id.map_or(true, |h| parts[0] == h);
-                let matches_checkin = check_in.map_or(true, |c| parts[1] == c);
-                let matches_checkout = check_out.map_or(true, |c| parts[2] == c);
+                let matches_hotel = hotel_id.is_none_or(|h| parts[0] == h);
+                let matches_checkin = check_in.is_none_or(|c| parts[1] == c);
+                let matches_checkout = check_out.is_none_or(|c| parts[2] == c);
 
                 matches_hotel && matches_checkin && matches_checkout
             })
@@ -182,7 +182,7 @@ impl AvailabilityCache for ExampleCache {
         count
     }
 
-    fn resize(&self, new_max_size_mb: usize) -> bool {
+    fn resize(&self, _new_max_size_mb: usize) -> bool {
         // Simple implementation - just update config
         // Real implementation would enforce new size immediately
         true
