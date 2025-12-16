@@ -44,10 +44,15 @@ impl Default for CacheConfig {
 
 // Sharded cache implementation
 pub struct ShardedCache {
-    shards: Vec<Arc<RwLock<HashMap<String, CacheEntry>>>>,
+    shards: Vec<Arc<RwLock<ShardData>>>,
     config: CacheConfig,
     stats: Arc<RwLock<CacheStats>>,
     eviction_policy: Arc<RwLock<EvictionPolicy>>,
+}
+
+struct ShardData {
+    entries: HashMap<String, CacheEntry>,
+    lru_order: Vec<String>,
 }
 
 struct CacheEntry {
@@ -65,11 +70,35 @@ impl CacheEntry {
     }
 }
 
+impl ShardData {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            lru_order: Vec::new(),
+        }
+    }
+}
+
 impl ShardedCache {
     fn get_shard_index(&self, key: &str) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() as usize) % self.shards.len()
+    }
+    
+    fn evict_lru(&self, shard: &Arc<RwLock<ShardData>>, needed_size: usize) -> usize {
+        let mut shard_guard = shard.write();
+        let mut evicted_size = 0;
+        
+        while evicted_size < needed_size && !shard_guard.lru_order.is_empty() {
+            if let Some(key) = shard_guard.lru_order.pop() {
+                if let Some(entry) = shard_guard.entries.remove(&key) {
+                    evicted_size += entry.size_bytes;
+                }
+            }
+        }
+        
+        evicted_size
     }
 }
 
@@ -77,7 +106,7 @@ impl AvailabilityCache for ShardedCache {
     fn new(config: CacheConfig) -> Self {
         let shards_count = config.shards_count.max(1);
         let shards: Vec<_> = (0..shards_count)
-            .map(|_| Arc::new(RwLock::new(HashMap::new())))
+            .map(|_| Arc::new(RwLock::new(ShardData::new())))
             .collect();
         
         Self {
@@ -108,11 +137,18 @@ impl AvailabilityCache for ShardedCache {
         let mut shard_guard = shard.write();
         let mut stats_guard = self.stats.write();
         
-        let current_size: usize = shard_guard.values().map(|e| e.size_bytes).sum();
+        let current_size: usize = shard_guard.entries.values().map(|e| e.size_bytes).sum();
         
         if current_size + item_size > max_size_bytes {
-            stats_guard.rejected_count += 1;
-            return false;
+            let policy = *self.eviction_policy.read();
+            if policy == EvictionPolicy::LeastRecentlyUsed {
+                let evicted = self.evict_lru(shard, item_size);
+                stats_guard.eviction_count += 1;
+                stats_guard.size_bytes -= evicted;
+            } else {
+                stats_guard.rejected_count += 1;
+                return false;
+            }
         }
         
         let entry = CacheEntry {
@@ -124,7 +160,8 @@ impl AvailabilityCache for ShardedCache {
             size_bytes: item_size,
         };
         
-        shard_guard.insert(key, entry);
+        shard_guard.entries.insert(key.clone(), entry);
+        shard_guard.lru_order.insert(0, key);
         stats_guard.items_count += 1;
         stats_guard.size_bytes += item_size;
         
@@ -149,9 +186,11 @@ impl AvailabilityCache for ShardedCache {
         
         stats_guard.total_lookups += 1;
         
-        if let Some(entry) = shard_guard.get_mut(&key) {
+        if let Some(entry) = shard_guard.entries.get_mut(&key) {
             if entry.is_expired() {
-                shard_guard.remove(&key);
+                drop(entry);
+                shard_guard.entries.remove(&key);
+                shard_guard.lru_order.retain(|k| k != &key);
                 stats_guard.expired_count += 1;
                 stats_guard.miss_count += 1;
                 return None;
@@ -159,6 +198,13 @@ impl AvailabilityCache for ShardedCache {
             
             entry.access_count += 1;
             entry.last_accessed = Instant::now();
+            let data = entry.data.clone();
+            drop(entry);
+            
+            // update lru order
+            shard_guard.lru_order.retain(|k| k != &key);
+            shard_guard.lru_order.insert(0, key.clone());
+            
             stats_guard.hit_count += 1;
             
             let lookup_time = start_time.elapsed().as_nanos() as u64;
@@ -167,7 +213,7 @@ impl AvailabilityCache for ShardedCache {
                     (stats_guard.average_lookup_time_ns * (stats_guard.total_lookups - 1) as u64 + lookup_time) / stats_guard.total_lookups as u64;
             }
             
-            Some((entry.data.clone(), true))
+            Some((data, true))
         } else {
             stats_guard.miss_count += 1;
             None
@@ -182,8 +228,8 @@ impl AvailabilityCache for ShardedCache {
         let mut total_size = 0;
         for shard in &self.shards {
             let shard_guard = shard.read();
-            total_items += shard_guard.len();
-            total_size += shard_guard.values().map(|e| e.size_bytes).sum::<usize>();
+            total_items += shard_guard.entries.len();
+            total_size += shard_guard.entries.values().map(|e| e.size_bytes).sum::<usize>();
         }
         stats.items_count = total_items;
         stats.size_bytes = total_size;
