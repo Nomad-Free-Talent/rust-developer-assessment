@@ -50,6 +50,7 @@ pub struct ShardedCache {
     stats: Arc<RwLock<CacheStats>>,
     eviction_policy: Arc<RwLock<EvictionPolicy>>,
     cleanup_handle: Option<thread::JoinHandle<()>>,
+    pending_fetches: Arc<Mutex<StdHashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>>,
 }
 
 struct ShardData {
@@ -200,6 +201,7 @@ impl AvailabilityCache for ShardedCache {
             stats: stats_clone,
             eviction_policy: Arc::new(RwLock::new(EvictionPolicy::LeastRecentlyUsed)),
             cleanup_handle: Some(cleanup_handle),
+            pending_fetches: Arc::new(Mutex::new(StdHashMap::new())),
         }
     }
 
@@ -274,6 +276,17 @@ impl AvailabilityCache for ShardedCache {
     fn get(&self, hotel_id: &str, check_in: &str, check_out: &str) -> Option<(Vec<u8>, bool)> {
         let start_time = Instant::now();
         let key = create_cache_key(hotel_id, check_in, check_out);
+        
+        // check if there's a pending fetch for this key
+        let pending = self.pending_fetches.lock().unwrap();
+        if let Some(data_arc) = pending.get(&key) {
+            let data_guard = data_arc.lock().unwrap();
+            if let Some(ref data) = *data_guard {
+                return Some((data.clone(), true));
+            }
+        }
+        drop(pending);
+        
         let shard_index = self.get_shard_index(&key);
         let shard = &self.shards[shard_index];
         
