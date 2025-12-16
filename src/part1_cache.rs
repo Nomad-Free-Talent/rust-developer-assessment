@@ -7,6 +7,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::thread;
 
 // Enhanced stats for the cache
 #[derive(Debug, Default, Clone)]
@@ -48,6 +49,7 @@ pub struct ShardedCache {
     config: CacheConfig,
     stats: Arc<RwLock<CacheStats>>,
     eviction_policy: Arc<RwLock<EvictionPolicy>>,
+    cleanup_handle: Option<thread::JoinHandle<()>>,
 }
 
 struct ShardData {
@@ -161,11 +163,43 @@ impl AvailabilityCache for ShardedCache {
             .map(|_| Arc::new(RwLock::new(ShardData::new())))
             .collect();
         
+        let shards_clone: Vec<_> = shards.iter().map(|s| Arc::clone(s)).collect();
+        let stats_clone = Arc::new(RwLock::new(CacheStats::default()));
+        let stats_for_cleanup = Arc::clone(&stats_clone);
+        let cleanup_interval = config.cleanup_interval_seconds;
+        
+        let cleanup_handle = thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(cleanup_interval));
+                let mut total_expired = 0;
+                for shard in &shards_clone {
+                    let mut shard_guard = shard.write();
+                    let keys_to_remove: Vec<String> = shard_guard.entries
+                        .iter()
+                        .filter(|(_, entry)| entry.is_expired())
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    
+                    for key in keys_to_remove {
+                        if shard_guard.entries.remove(&key).is_some() {
+                            shard_guard.lru_order.retain(|k| k != &key);
+                            shard_guard.lfu_frequencies.remove(&key);
+                            total_expired += 1;
+                        }
+                    }
+                }
+                if total_expired > 0 {
+                    stats_for_cleanup.write().expired_count += total_expired;
+                }
+            }
+        });
+        
         Self {
             shards,
             config,
-            stats: Arc::new(RwLock::new(CacheStats::default())),
+            stats: stats_clone,
             eviction_policy: Arc::new(RwLock::new(EvictionPolicy::LeastRecentlyUsed)),
+            cleanup_handle: Some(cleanup_handle),
         }
     }
 
