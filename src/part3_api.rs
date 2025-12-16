@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Instant as TokioInstant, sleep};
 use std::collections::BinaryHeap;
+use reqwest::Client as HttpClient;
 
 // Enhanced error types for API client
 #[derive(Error, Debug)]
@@ -115,7 +116,7 @@ impl Default for CircuitBreakerConfig {
 }
 
 // Request priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum RequestPriority {
     Low = 0,
     Medium = 1,
@@ -152,7 +153,7 @@ pub struct ClientStats {
 }
 
 // Request and response types (enhanced for the assessment)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchRequest {
     pub hotel_ids: Vec<String>,
     pub check_in: String,
@@ -163,7 +164,7 @@ pub struct SearchRequest {
     pub context: RequestContext,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RequestContext {
     pub user_id: Option<String>,
     pub session_id: Option<String>,
@@ -172,14 +173,14 @@ pub struct RequestContext {
     pub request_deadline: Option<std::time::SystemTime>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientInfo {
     pub ip: String,
     pub user_agent: String,
     pub country: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResponse {
     pub search_id: String,
     pub results: Vec<SearchResult>,
@@ -187,7 +188,7 @@ pub struct SearchResponse {
     pub processing_time_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub hotel_id: String,
     pub available: bool,
@@ -195,7 +196,7 @@ pub struct SearchResult {
     pub currency: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BookingRequest {
     pub search_id: String,
     pub hotel_id: String,
@@ -206,7 +207,7 @@ pub struct BookingRequest {
     pub context: RequestContext,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaymentInfo {
     pub card_type: String,
     pub last_four: String,
@@ -214,7 +215,7 @@ pub struct PaymentInfo {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BookingResponse {
     pub booking_id: String,
     pub status: String,
@@ -267,6 +268,7 @@ pub struct BookingApiClient {
     token_bucket: Arc<TokenBucket>,
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
     request_queue: Arc<Mutex<BinaryHeap<QueuedRequest>>>,
+    http_client: HttpClient,
 }
 
 struct QueuedRequest {
@@ -394,15 +396,92 @@ impl CircuitBreaker {
 
 #[async_trait]
 impl ApiClient for BookingApiClient {
-    async fn search(&self, _request: SearchRequest) -> Result<SearchResponse, ApiError> {
-        // TODO: Implement with:
-        // - Rate limiting using token bucket algorithm
-        // - Priority-based queueing
-        // - Circuit breaker pattern
-        // - Retry with exponential backoff and jitter
-        // - Detailed telemetry collection
-        // - Adaptive throttling based on system health
-        Err(ApiError::Other("Not implemented".to_string()))
+    async fn search(&self, request: SearchRequest) -> Result<SearchResponse, ApiError> {
+        // throttleing with token bucket
+        if !self.token_bucket.acquire(1).await {
+            let mut stats = self.stats.lock().await;
+            stats.requests_throttled += 1;
+            return Err(ApiError::RateLimitExceeded("Rate limit exceeded".to_string()));
+        }
+        
+        let mut cb = self.circuit_breaker.lock().await;
+        if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+            return Err(ApiError::CircuitBreakerOpen {
+                service_name: "booking_api".to_string(),
+                retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
+            });
+        }
+        drop(cb);
+        
+        let mut stats = self.stats.lock().await;
+        stats.requests_sent += 1;
+        drop(stats);
+        
+        // retry logic
+        let mut last_error = None;
+        for attempt in 0..=self.config.retry_config.max_retries {
+            let backoff = BookingApiClient::calculate_backoff(attempt, &self.config.retry_config);
+            if attempt > 0 {
+                sleep(backoff).await;
+            }
+            
+            match self.http_client
+                .post(&format!("{}/search", self.config.base_url))
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let result: SearchResponse = response.json().await
+                            .map_err(|e| ApiError::NetworkError(e.to_string()))?;
+                        
+                        let mut stats = self.stats.lock().await;
+                        stats.requests_succeeded += 1;
+                        let mut cb = self.circuit_breaker.lock().await;
+                        cb.record_success();
+                        drop(cb);
+                        drop(stats);
+                        
+                        return Ok(result);
+                    } else if response.status().is_server_error() && attempt < self.config.retry_config.max_retries {
+                        last_error = Some(ApiError::ApiResponseError {
+                            status_code: response.status().as_u16(),
+                            message: "Server error".to_string(),
+                            is_retryable: true,
+                        });
+                        continue;
+                    } else {
+                        return Err(ApiError::ApiResponseError {
+                            status_code: response.status().as_u16(),
+                            message: "Request failed".to_string(),
+                            is_retryable: false,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if attempt < self.config.retry_config.max_retries {
+                        last_error = Some(ApiError::NetworkError(e.to_string()));
+                        let mut stats = self.stats.lock().await;
+                        stats.requests_retried += 1;
+                        drop(stats);
+                        continue;
+                    } else {
+                        return Err(ApiError::NetworkError(e.to_string()));
+                    }
+                }
+            }
+        }
+        
+        let mut stats = self.stats.lock().await;
+        stats.requests_failed += 1;
+        let mut cb = self.circuit_breaker.lock().await;
+        cb.record_failure(&self.config.circuit_breaker_config);
+        drop(cb);
+        drop(stats);
+        
+        Err(last_error.unwrap_or_else(|| ApiError::Other("Request failed".to_string())))
     }
 
     async fn book(&self, _request: BookingRequest) -> Result<BookingResponse, ApiError> {
@@ -464,12 +543,18 @@ impl BookingApiClient {
         
         let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new()));
         
+        let http_client = HttpClient::builder()
+            .timeout(Duration::from_millis(config.timeout_ms))
+            .build()
+            .map_err(|e| ClientError::InitError(e.to_string()))?;
+        
         Ok(Self {
             config,
             stats: Arc::new(Mutex::new(ClientStats::default())),
             token_bucket,
             circuit_breaker,
             request_queue: Arc::new(Mutex::new(BinaryHeap::new())),
+            http_client,
         })
     }
 
