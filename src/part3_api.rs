@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -271,6 +271,7 @@ pub struct BookingApiClient {
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
     request_queue: Arc<Mutex<BinaryHeap<QueuedRequest>>>,
     http_client: HttpClient,
+    correlation_id_map: Arc<Mutex<HashMap<String, String>>>,
 }
 
 struct QueuedRequest {
@@ -410,10 +411,21 @@ impl CircuitBreaker {
 #[async_trait]
 impl ApiClient for BookingApiClient {
     async fn search(&self, request: SearchRequest) -> Result<SearchResponse, ApiError> {
+        // generate request_id and store correlation_id mapping
+        let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
+        let correlation_id = request.context.correlation_id.clone();
+        {
+            let mut map = self.correlation_id_map.lock().await;
+            map.insert(correlation_id.clone(), request_id.clone());
+        }
+
         // throttling with token bucket
         if !self.token_bucket.acquire(1).await {
             let mut stats = self.stats.lock().await;
             stats.requests_throttled += 1;
+            // cleanup mapping on failure
+            let mut map = self.correlation_id_map.lock().await;
+            map.remove(&correlation_id);
             return Err(ApiError::RateLimitExceeded(
                 "Rate limit exceeded".to_string(),
             ));
@@ -421,6 +433,9 @@ impl ApiClient for BookingApiClient {
 
         let mut cb = self.circuit_breaker.lock().await;
         if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+            // cleanup mapping on failure
+            let mut map = self.correlation_id_map.lock().await;
+            map.remove(&correlation_id);
             return Err(ApiError::CircuitBreakerOpen {
                 service_name: "booking_api".to_string(),
                 retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
@@ -462,6 +477,10 @@ impl ApiClient for BookingApiClient {
                         drop(cb);
                         drop(stats);
 
+                        // cleanup mapping on success
+                        let mut map = self.correlation_id_map.lock().await;
+                        map.remove(&correlation_id);
+
                         return Ok(result);
                     } else if response.status().is_server_error()
                         && attempt < self.config.retry_config.max_retries
@@ -501,10 +520,22 @@ impl ApiClient for BookingApiClient {
         drop(cb);
         drop(stats);
 
+        // cleanup mapping on failure
+        let mut map = self.correlation_id_map.lock().await;
+        map.remove(&correlation_id);
+
         Err(last_error.unwrap_or_else(|| ApiError::Other("Request failed".to_string())))
     }
 
     async fn book(&self, request: BookingRequest) -> Result<BookingResponse, ApiError> {
+        // generate request_id and store correlation_id mapping
+        let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
+        let correlation_id = request.context.correlation_id.clone();
+        {
+            let mut map = self.correlation_id_map.lock().await;
+            map.insert(correlation_id.clone(), request_id.clone());
+        }
+
         // bookings have higher priority - bypass some rate limits
         if !self.token_bucket.acquire(1).await {
             // try to preempt lower priority requests
@@ -522,6 +553,9 @@ impl ApiClient for BookingApiClient {
             if !self.token_bucket.acquire(1).await {
                 let mut stats = self.stats.lock().await;
                 stats.requests_throttled += 1;
+                // cleanup mapping on failure
+                let mut map = self.correlation_id_map.lock().await;
+                map.remove(&correlation_id);
                 return Err(ApiError::RateLimitExceeded(
                     "Rate limit exceeded".to_string(),
                 ));
@@ -530,6 +564,9 @@ impl ApiClient for BookingApiClient {
 
         let mut cb = self.circuit_breaker.lock().await;
         if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+            // cleanup mapping on failure
+            let mut map = self.correlation_id_map.lock().await;
+            map.remove(&correlation_id);
             return Err(ApiError::CircuitBreakerOpen {
                 service_name: "booking_api".to_string(),
                 retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
@@ -632,11 +669,35 @@ impl ApiClient for BookingApiClient {
     }
 
     async fn cancel_request(&self, correlation_id: &str) -> bool {
-        // check if request is in queue and remove it
-        let mut queue = self.request_queue.lock().await;
-        let initial_len = queue.len();
-        // note: would need to store correlation_id mapping
-        queue.len() < initial_len
+        // lookup request_id from correlation_id
+        let request_id = {
+            let map = self.correlation_id_map.lock().await;
+            map.get(correlation_id).cloned()
+        };
+
+        if let Some(req_id) = request_id {
+            // remove from queue if present
+            let mut queue = self.request_queue.lock().await;
+            let mut found = false;
+            let mut new_queue = BinaryHeap::new();
+            while let Some(item) = queue.pop() {
+                if item.request_id == req_id {
+                    found = true;
+                } else {
+                    new_queue.push(item);
+                }
+            }
+            *queue = new_queue;
+            drop(queue);
+
+            // remove from mapping
+            let mut map = self.correlation_id_map.lock().await;
+            map.remove(correlation_id);
+
+            found
+        } else {
+            false
+        }
     }
 
     async fn update_config(&self, config: ClientConfig) -> Result<(), ClientError> {
@@ -695,6 +756,7 @@ impl BookingApiClient {
             circuit_breaker,
             request_queue: Arc::new(Mutex::new(BinaryHeap::new())),
             http_client,
+            correlation_id_map: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
