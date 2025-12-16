@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Instant as TokioInstant, sleep};
+use std::collections::BinaryHeap;
 
 // Enhanced error types for API client
 #[derive(Error, Debug)]
@@ -265,6 +266,36 @@ pub struct BookingApiClient {
     stats: Arc<Mutex<ClientStats>>,
     token_bucket: Arc<TokenBucket>,
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
+    request_queue: Arc<Mutex<BinaryHeap<QueuedRequest>>>,
+}
+
+struct QueuedRequest {
+    priority: RequestPriority,
+    request_id: String,
+    timestamp: TokioInstant,
+}
+
+impl PartialEq for QueuedRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.timestamp == other.timestamp
+    }
+}
+
+impl Eq for QueuedRequest {}
+
+impl PartialOrd for QueuedRequest {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QueuedRequest {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match other.priority.cmp(&self.priority) {
+            std::cmp::Ordering::Equal => self.timestamp.cmp(&other.timestamp),
+            other => other,
+        }
+    }
 }
 
 struct TokenBucket {
@@ -438,6 +469,7 @@ impl BookingApiClient {
             stats: Arc::new(Mutex::new(ClientStats::default())),
             token_bucket,
             circuit_breaker,
+            request_queue: Arc::new(Mutex::new(BinaryHeap::new())),
         })
     }
 
