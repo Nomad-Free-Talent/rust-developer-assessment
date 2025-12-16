@@ -1,29 +1,29 @@
 // Part 2: XML Processing Implementation
 
-use thiserror::Error;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // Error types for XML processing
 #[derive(Error, Debug)]
 pub enum ProcessingError {
     #[error("XML parse error: {0}")]
     XmlParseError(String),
-    
+
     #[error("JSON parse error: {0}")]
     JsonParseError(String),
-    
+
     #[error("Missing required field: {0}")]
     MissingRequiredField(String),
-    
+
     #[error("Invalid format: {0}")]
     InvalidFormat(String),
-    
+
     #[error("Conversion error: {0}")]
     ConversionError(String),
-    
+
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    
+
     // Add other error types as needed
     #[error("Other error: {0}")]
     Other(String),
@@ -121,7 +121,7 @@ pub struct ProcessedResponse {
     pub currency: String,
     pub nationality: String,
     pub check_in: String,
-    pub check_out: String
+    pub check_out: String,
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +135,7 @@ pub struct HotelOption {
     pub cancellation_policies: Vec<ProcessedCancellationPolicy>,
     pub payment_type: String,
     pub is_refundable: bool,
-    pub search_token: String
+    pub search_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -159,34 +159,33 @@ pub struct FilterCriteria {
     pub board_types: Option<Vec<String>>,
     pub free_cancellation: bool,
     pub hotel_ids: Option<Vec<String>>,
-    pub room_type_contains: Option<String>
+    pub room_type_contains: Option<String>,
 }
 
 // Hotel search processor to implement
-pub struct HotelSearchProcessor {
-}
+pub struct HotelSearchProcessor {}
 
 impl HotelSearchProcessor {
     // Create a new processor
     pub fn new() -> Self {
         Self {}
     }
-    
+
     // Process an XML hotel search response and extract key information
     // The response can be large (1MB+) and should be processed efficiently
     pub fn process(&self, xml: &str) -> Result<ProcessedResponse, ProcessingError> {
         use quick_xml::events::Event;
         use quick_xml::Reader;
-        
+
         let mut reader = Reader::from_str(xml);
         reader.trim_text(true);
-        
+
         let mut hotels = Vec::new();
         let mut buf = Vec::new();
-        
+
         // parse hotel data from xml
         // parse cancellation policies
-        
+
         let mut current_hotel_id = String::new();
         let mut current_hotel_name = String::new();
         let mut current_board_type = String::new();
@@ -197,20 +196,20 @@ impl HotelSearchProcessor {
         let mut current_search_token = String::new();
         let mut is_refundable = true;
         let mut current_cancellation_policies = Vec::new();
-        
+
         let mut in_hotel = false;
         let mut in_mealplan = false;
         let mut in_option = false;
         let mut in_room = false;
         let mut in_cancel_penalty = false;
         let mut current_tag: Option<Vec<u8>> = None;
-        
+
         let mut current_hours_before = 0;
         let mut current_penalty_amount = 0.0;
         let mut current_penalty_currency = String::new();
         let mut current_penalty_type = String::new();
         let mut current_deadline = String::new();
-        
+
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
@@ -222,10 +221,12 @@ impl HotelSearchProcessor {
                                 if let Ok(attr) = attr {
                                     match attr.key.as_ref() {
                                         b"code" => {
-                                            current_hotel_id = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_hotel_id =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"name" => {
-                                            current_hotel_name = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_hotel_name =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         _ => {}
                                     }
@@ -237,7 +238,8 @@ impl HotelSearchProcessor {
                             for attr in e.attributes() {
                                 if let Ok(attr) = attr {
                                     if attr.key.as_ref() == b"code" {
-                                        current_board_type = String::from_utf8_lossy(&attr.value).to_string();
+                                        current_board_type =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
                                 }
                             }
@@ -258,10 +260,12 @@ impl HotelSearchProcessor {
                                 if let Ok(attr) = attr {
                                     match attr.key.as_ref() {
                                         b"code" => {
-                                            current_room_code = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_room_code =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"description" => {
-                                            current_room_desc = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_room_desc =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"nonRefundable" => {
                                             let val = String::from_utf8_lossy(&attr.value);
@@ -273,18 +277,17 @@ impl HotelSearchProcessor {
                             }
                         }
                         b"Parameter" => {
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    if attr.key.as_ref() == b"key" {
-                                        let key_val = String::from_utf8_lossy(&attr.value);
-                                        if key_val == "search_token" {
-                                            // will get value from next attribute
-                                        }
-                                    } else if attr.key.as_ref() == b"value" {
-                                        let val = String::from_utf8_lossy(&attr.value);
-                                        if val.contains('|') {
-                                            current_search_token = val.to_string();
-                                        }
+                            let mut found_key = false;
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"key" {
+                                    let key_val = String::from_utf8_lossy(&attr.value);
+                                    if key_val == "search_token" {
+                                        found_key = true;
+                                    }
+                                } else if attr.key.as_ref() == b"value" && found_key {
+                                    let val = String::from_utf8_lossy(&attr.value);
+                                    if val.contains('|') {
+                                        current_search_token = val.to_string();
                                     }
                                 }
                             }
@@ -294,11 +297,13 @@ impl HotelSearchProcessor {
                                 if let Ok(attr) = attr {
                                     match attr.key.as_ref() {
                                         b"currency" => {
-                                            current_price_currency = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_price_currency =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"amount" => {
                                             let amount_str = String::from_utf8_lossy(&attr.value);
-                                            current_price_amount = amount_str.parse().unwrap_or(0.0);
+                                            current_price_amount =
+                                                amount_str.parse().unwrap_or(0.0);
                                         }
                                         _ => {}
                                     }
@@ -318,10 +323,12 @@ impl HotelSearchProcessor {
                                 if let Ok(attr) = attr {
                                     match attr.key.as_ref() {
                                         b"type" => {
-                                            current_penalty_type = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_penalty_type =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"currency" => {
-                                            current_penalty_currency = String::from_utf8_lossy(&attr.value).to_string();
+                                            current_penalty_currency =
+                                                String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         _ => {}
                                     }
@@ -384,7 +391,8 @@ impl HotelSearchProcessor {
                                             amount: current_price_amount,
                                             currency: current_price_currency.clone(),
                                         },
-                                        cancellation_policies: current_cancellation_policies.clone(),
+                                        cancellation_policies: current_cancellation_policies
+                                            .clone(),
                                         payment_type: "MerchantPay".to_string(),
                                         is_refundable,
                                         search_token: current_search_token.clone(),
@@ -413,19 +421,24 @@ impl HotelSearchProcessor {
                     current_tag = None;
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {}", e))),
+                Err(e) => {
+                    return Err(ProcessingError::XmlParseError(format!(
+                        "Parse error: {}",
+                        e
+                    )))
+                }
                 _ => {}
             }
             buf.clear();
         }
-        
+
         // extract metadata from search_token
         let mut search_id = String::new();
         let mut check_in = String::new();
         let mut check_out = String::new();
         let mut currency = String::new();
         let mut nationality = String::new();
-        
+
         if !current_search_token.is_empty() {
             let parts: Vec<&str> = current_search_token.split('|').collect();
             if parts.len() >= 6 {
@@ -436,12 +449,12 @@ impl HotelSearchProcessor {
                 currency = parts.get(5).unwrap_or(&"").to_string();
             }
         }
-        
+
         // if currency not found, use from first hotel price
         if currency.is_empty() && !hotels.is_empty() {
             currency = hotels[0].price.currency.clone();
         }
-        
+
         Ok(ProcessedResponse {
             search_id,
             total_options: hotels.len(),
@@ -452,7 +465,7 @@ impl HotelSearchProcessor {
             check_out,
         })
     }
-    
+
     // Convert supplier JSON response to XML format
     pub fn convert_json_to_xml(&self, json_str: &str) -> Result<String, ProcessingError> {
         fn escape_xml(s: &str) -> String {
@@ -467,32 +480,35 @@ impl HotelSearchProcessor {
             Ok(response) => response,
             Err(e) => return Err(ProcessingError::JsonParseError(e.to_string())),
         };
-        
+
         // Convert to XML format
         // In a real implementation, you would use a proper XML builder library
         // This is a simplified version for the assessment
         let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         xml.push_str("<AvailRS>\n");
         xml.push_str("  <Hotels>\n");
-        
+
         for hotel in &supplier_response.hotels {
             let hotel_id_escaped = escape_xml(&hotel.hotel_id);
             let hotel_name_escaped = escape_xml(&hotel.name);
-            xml.push_str(&format!("    <Hotel code=\"{}\" name=\"{}\">\n", 
-                hotel_id_escaped, hotel_name_escaped));
+            xml.push_str(&format!(
+                "    <Hotel code=\"{}\" name=\"{}\">\n",
+                hotel_id_escaped, hotel_name_escaped
+            ));
             xml.push_str("      <MealPlans>\n");
-            
+
             // Group rooms by board type
             let mut board_types = std::collections::HashMap::new();
-            
+
             for room in &hotel.rooms {
                 for rate in &room.rates {
-                    let entries = board_types.entry(rate.board_type.clone())
+                    let entries = board_types
+                        .entry(rate.board_type.clone())
                         .or_insert_with(Vec::new);
                     entries.push((room, rate));
                 }
             }
-            
+
             for (board_type, room_rates) in board_types {
                 xml.push_str(&format!("        <MealPlan code=\"{}\">\n", board_type));
                 xml.push_str("          <Options>\n");
@@ -500,7 +516,7 @@ impl HotelSearchProcessor {
                 xml.push_str(&format!("              <Price currency=\"{}\" amount=\"{}\" binding=\"false\" commission=\"-1\" minimumSellingPrice=\"-1\"/>\n", 
                     supplier_response.currency, room_rates[0].1.price));
                 xml.push_str("              <Rooms>\n");
-                
+
                 for (room, rate) in room_rates {
                     let room_id_escaped = escape_xml(&room.room_id);
                     let room_name_escaped = escape_xml(&room.name);
@@ -508,124 +524,145 @@ impl HotelSearchProcessor {
                         room_id_escaped, room_id_escaped, room_name_escaped));
                     xml.push_str(&format!("                  <Price currency=\"{}\" amount=\"{}\" binding=\"false\" commission=\"-1\" minimumSellingPrice=\"-1\"/>\n", 
                         escape_xml(&supplier_response.currency), rate.price));
-                    
+
                     if !rate.cancellation_policies.is_empty() {
-                        xml.push_str("                  <CancelPenalties nonRefundable=\"false\">\n");
-                        
+                        xml.push_str(
+                            "                  <CancelPenalties nonRefundable=\"false\">\n",
+                        );
+
                         for policy in &rate.cancellation_policies {
                             xml.push_str("                    <CancelPenalty>\n");
                             xml.push_str("                      <HoursBefore>24</HoursBefore>\n");
                             let deadline_escaped = escape_xml(&policy.from_date);
                             xml.push_str(&format!("                      <Penalty type=\"Importe\" currency=\"{}\">{}</Penalty>\n", 
                                 escape_xml(&supplier_response.currency), policy.amount));
-                            xml.push_str(&format!("                      <Deadline>{}</Deadline>\n", deadline_escaped));
+                            xml.push_str(&format!(
+                                "                      <Deadline>{}</Deadline>\n",
+                                deadline_escaped
+                            ));
                             xml.push_str("                    </CancelPenalty>\n");
                         }
-                        
+
                         xml.push_str("                  </CancelPenalties>\n");
                     }
-                    
+
                     xml.push_str("                </Room>\n");
                 }
-                
+
                 xml.push_str("              </Rooms>\n");
                 xml.push_str("              <Parameters>\n");
-                xml.push_str(&format!("                <Parameter key=\"search_token\" value=\"{}|||||{}\"/>\n", 
-                    escape_xml(&hotel.hotel_id), escape_xml(&supplier_response.search_id)));
+                xml.push_str(&format!(
+                    "                <Parameter key=\"search_token\" value=\"{}|||||{}\"/>\n",
+                    escape_xml(&hotel.hotel_id),
+                    escape_xml(&supplier_response.search_id)
+                ));
                 xml.push_str("              </Parameters>\n");
                 xml.push_str("            </Option>\n");
                 xml.push_str("          </Options>\n");
                 xml.push_str("        </MealPlan>\n");
             }
-            
+
             xml.push_str("      </MealPlans>\n");
             xml.push_str("    </Hotel>\n");
         }
-        
+
         xml.push_str("  </Hotels>\n");
         xml.push_str("</AvailRS>\n");
-        
+
         Ok(xml)
     }
-    
+
     // Convert XML response to ProcessedResponse format
-    pub fn xml_to_processed_response(&self, _xml: &str) -> Result<ProcessedResponse, ProcessingError> {
+    pub fn xml_to_processed_response(
+        &self,
+        _xml: &str,
+    ) -> Result<ProcessedResponse, ProcessingError> {
         // TODO: Implement this to convert XML to ProcessedResponse
         // This would be implemented in a real solution
         Err(ProcessingError::Other("Not implemented".to_string()))
     }
-    
+
     // Extract hotel options that match the given criteria
-    pub fn filter_options(&self, response: &ProcessedResponse, 
-                     criteria: &FilterCriteria) -> Vec<HotelOption> {
+    pub fn filter_options(
+        &self,
+        response: &ProcessedResponse,
+        criteria: &FilterCriteria,
+    ) -> Vec<HotelOption> {
         let mut filtered = Vec::new();
-        
+
         for hotel in &response.hotels {
             // Apply filters
-            let price_ok = criteria.max_price
+            let price_ok = criteria
+                .max_price
                 .map_or(true, |max| hotel.price.amount <= max);
-                
-            let board_type_ok = criteria.board_types
+
+            let board_type_ok = criteria
+                .board_types
                 .as_ref()
                 .map_or(true, |types| types.contains(&hotel.board_type));
-                
+
             let cancellation_ok = !criteria.free_cancellation || hotel.is_refundable;
-            
-            let hotel_id_ok = criteria.hotel_ids
+
+            let hotel_id_ok = criteria
+                .hotel_ids
                 .as_ref()
                 .map_or(true, |ids| ids.contains(&hotel.hotel_id));
-                
-            let room_type_ok = criteria.room_type_contains
+
+            let room_type_ok = criteria
+                .room_type_contains
                 .as_ref()
                 .map_or(true, |substring| hotel.room_type.contains(substring));
-                
+
             if price_ok && board_type_ok && cancellation_ok && hotel_id_ok && room_type_ok {
                 filtered.push(hotel.clone());
             }
         }
-        
+
         filtered
     }
-    
+
     // Helper method to load the sample JSON response
     pub fn load_sample_json(&self) -> Result<String, ProcessingError> {
         match std::fs::read_to_string(SAMPLE_JSON_PATH) {
             Ok(content) => Ok(content),
-            Err(e) => Err(ProcessingError::IoError(e))
+            Err(e) => Err(ProcessingError::IoError(e)),
         }
     }
-    
+
     // Helper method to load the sample response XML
     pub fn load_sample_response(&self) -> Result<String, ProcessingError> {
         match std::fs::read_to_string(SAMPLE_XML_PATH) {
             Ok(content) => Ok(content),
-            Err(e) => Err(ProcessingError::IoError(e))
+            Err(e) => Err(ProcessingError::IoError(e)),
         }
     }
-    
+
     // Helper method to load the sample request XML
     pub fn load_sample_request(&self) -> Result<String, ProcessingError> {
         match std::fs::read_to_string(SAMPLE_REQUEST_PATH) {
             Ok(content) => Ok(content),
-            Err(e) => Err(ProcessingError::IoError(e))
+            Err(e) => Err(ProcessingError::IoError(e)),
         }
     }
-    
+
     // extract params from request xml
-    pub fn extract_search_params(&self, request_xml: &str) -> Result<(String, String, String, String), ProcessingError> {
+    pub fn extract_search_params(
+        &self,
+        request_xml: &str,
+    ) -> Result<(String, String, String, String), ProcessingError> {
         use quick_xml::events::Event;
         use quick_xml::Reader;
-        
+
         let mut reader = Reader::from_str(request_xml);
         reader.trim_text(true);
-        
+
         let mut currency = String::new();
         let mut nationality = String::new();
         let mut start_date = String::new();
         let mut end_date = String::new();
         let mut buf = Vec::new();
         let mut current_tag: Option<Vec<u8>> = None;
-        
+
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
@@ -647,16 +684,27 @@ impl HotelSearchProcessor {
                     current_tag = None;
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {}", e))),
+                Err(e) => {
+                    return Err(ProcessingError::XmlParseError(format!(
+                        "Parse error: {}",
+                        e
+                    )))
+                }
                 _ => {}
             }
             buf.clear();
         }
-        
-        if currency.is_empty() || nationality.is_empty() || start_date.is_empty() || end_date.is_empty() {
-            return Err(ProcessingError::MissingRequiredField("One or more required fields missing".to_string()));
+
+        if currency.is_empty()
+            || nationality.is_empty()
+            || start_date.is_empty()
+            || end_date.is_empty()
+        {
+            return Err(ProcessingError::MissingRequiredField(
+                "One or more required fields missing".to_string(),
+            ));
         }
-        
+
         Ok((currency, nationality, start_date, end_date))
     }
 }
@@ -703,12 +751,12 @@ pub const SMALL_SAMPLE_XML: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     // Test JSON to XML conversion
     #[test]
     fn test_json_to_xml_conversion() {
         let processor = HotelSearchProcessor::new();
-        
+
         // Sample JSON for testing
         let sample_json = r#"{
             "hotels": [
@@ -747,67 +795,87 @@ mod tests {
             "currency": "USD",
             "timestamp": "2023-11-15T10:30:00Z"
         }"#;
-        
+
         // Convert JSON to XML
         let xml_result = processor.convert_json_to_xml(sample_json);
-        assert!(xml_result.is_ok(), "JSON to XML conversion failed: {:?}", xml_result.err());
-        
+        assert!(
+            xml_result.is_ok(),
+            "JSON to XML conversion failed: {:?}",
+            xml_result.err()
+        );
+
         let xml = xml_result.unwrap();
-        
+
         // Verify XML structure
         assert!(xml.contains("<AvailRS>"));
         assert!(xml.contains("<Hotel code=\"12345\""));
         assert!(xml.contains("<MealPlan code=\"BB\">"));
-        assert!(xml.contains("<Room id=\"1#DBL\"")); 
+        assert!(xml.contains("<Room id=\"1#DBL\""));
         assert!(xml.contains("<Price currency=\"USD\" amount=\"120.5\""));
         assert!(xml.contains("<Deadline>2023-12-01T00:00:00Z</Deadline>"));
         assert!(xml.contains("<Parameter key=\"search_token\" value=\"12345|||||SEARCH123\"/>"));
     }
-    
+
     // Test loading the sample JSON file
     #[test]
     fn test_load_sample_json() {
         let processor = HotelSearchProcessor::new();
         let result = processor.load_sample_json();
-        assert!(result.is_ok(), "Failed to load sample JSON: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to load sample JSON: {:?}",
+            result.err()
+        );
+
         // Verify it's a valid JSON
         let json = result.unwrap();
         let parse_result = serde_json::from_str::<SupplierResponse>(&json);
-        assert!(parse_result.is_ok(), "Failed to parse sample JSON: {:?}", parse_result.err());
+        assert!(
+            parse_result.is_ok(),
+            "Failed to parse sample JSON: {:?}",
+            parse_result.err()
+        );
     }
-    
+
     // Test full JSON to XML conversion workflow using sample files
     #[test]
     fn test_sample_json_to_xml_workflow() {
         let processor = HotelSearchProcessor::new();
-        
+
         // Load sample JSON
         let json_result = processor.load_sample_json();
-        assert!(json_result.is_ok(), "Failed to load sample JSON: {:?}", json_result.err());
-        
+        assert!(
+            json_result.is_ok(),
+            "Failed to load sample JSON: {:?}",
+            json_result.err()
+        );
+
         // Convert JSON to XML
         let xml_result = processor.convert_json_to_xml(&json_result.unwrap());
-        assert!(xml_result.is_ok(), "JSON to XML conversion failed: {:?}", xml_result.err());
-        
+        assert!(
+            xml_result.is_ok(),
+            "JSON to XML conversion failed: {:?}",
+            xml_result.err()
+        );
+
         let xml = xml_result.unwrap();
         assert!(xml.contains("<AvailRS>"));
         assert!(xml.contains("<Hotels>"));
         // The actual content will depend on the sample JSON file
     }
-    
+
     // Example test for processing XML (commented out as it would be implemented by candidates)
     // #[test]
     // fn test_process_xml() {
     //     let processor = HotelSearchProcessor::new();
     //     let result = processor.process(SMALL_SAMPLE_XML);
-    //     
+    //
     //     assert!(result.is_ok());
     //     let response = result.unwrap();
-    //     
+    //
     //     // Check basic response properties
     //     assert_eq!(response.hotels.len(), 1);
-    //     
+    //
     //     // Check first hotel
     //     let hotel = &response.hotels[0];
     //     assert_eq!(hotel.hotel_id, "39776757");
@@ -816,7 +884,7 @@ mod tests {
     //     assert_eq!(hotel.price.amount, 84.82);
     //     assert_eq!(hotel.price.currency, "GBP");
     //     assert_eq!(hotel.is_refundable, true);
-    //     
+    //
     //     // Check cancellation policy
     //     assert_eq!(hotel.cancellation_policies.len(), 1);
     //     let policy = &hotel.cancellation_policies[0];
@@ -824,12 +892,12 @@ mod tests {
     //     assert_eq!(policy.penalty_amount, 84.82);
     //     assert_eq!(policy.currency, "GBP");
     // }
-    
+
     // Example test for filtering options (commented out as it would be implemented by candidates)
     // #[test]
     // fn test_filter_options() {
     //     let processor = HotelSearchProcessor::new();
-    //     
+    //
     //     // Create a sample processed response with multiple hotels
     //     let mut response = ProcessedResponse {
     //         search_id: "test_search".to_string(),
@@ -840,7 +908,7 @@ mod tests {
     //         check_in: "2025-06-01".to_string(),
     //         check_out: "2025-06-05".to_string(),
     //     };
-    //     
+    //
     //     // Add sample hotels with different properties
     //     response.hotels.push(HotelOption {
     //         hotel_id: "hotel1".to_string(),
@@ -862,7 +930,7 @@ mod tests {
     //         is_refundable: true,
     //         search_token: "token1".to_string(),
     //     });
-    //     
+    //
     //     response.hotels.push(HotelOption {
     //         hotel_id: "hotel2".to_string(),
     //         hotel_name: "Budget Inn".to_string(),
@@ -875,7 +943,7 @@ mod tests {
     //         is_refundable: false,
     //         search_token: "token2".to_string(),
     //     });
-    //     
+    //
     //     response.hotels.push(HotelOption {
     //         hotel_id: "hotel3".to_string(),
     //         hotel_name: "Resort Spa".to_string(),
@@ -896,7 +964,7 @@ mod tests {
     //         is_refundable: true,
     //         search_token: "token3".to_string(),
     //     });
-    //     
+    //
     //     // Test 1: Filter by max price
     //     let criteria1 = FilterCriteria {
     //         max_price: Some(100.0),
@@ -905,11 +973,11 @@ mod tests {
     //         hotel_ids: None,
     //         room_type_contains: None,
     //     };
-    //     
+    //
     //     let results1 = processor.filter_options(&response, &criteria1);
     //     assert_eq!(results1.len(), 1);
     //     assert_eq!(results1[0].hotel_id, "hotel2");
-    //     
+    //
     //     // Test 2: Filter by board type
     //     let criteria2 = FilterCriteria {
     //         max_price: None,
@@ -918,12 +986,12 @@ mod tests {
     //         hotel_ids: None,
     //         room_type_contains: None,
     //     };
-    //     
+    //
     //     let results2 = processor.filter_options(&response, &criteria2);
     //     assert_eq!(results2.len(), 2);
     //     assert!(results2.iter().any(|h| h.hotel_id == "hotel1"));
     //     assert!(results2.iter().any(|h| h.hotel_id == "hotel3"));
-    //     
+    //
     //     // Test 3: Filter by free cancellation
     //     let criteria3 = FilterCriteria {
     //         max_price: None,
@@ -932,11 +1000,11 @@ mod tests {
     //         hotel_ids: None,
     //         room_type_contains: None,
     //     };
-    //     
+    //
     //     let results3 = processor.filter_options(&response, &criteria3);
     //     assert_eq!(results3.len(), 2);
     //     assert!(results3.iter().all(|h| h.is_refundable));
-    //     
+    //
     //     // Test 4: Filter by room type
     //     let criteria4 = FilterCriteria {
     //         max_price: None,
@@ -945,11 +1013,11 @@ mod tests {
     //         hotel_ids: None,
     //         room_type_contains: Some("Suite".to_string()),
     //     };
-    //     
+    //
     //     let results4 = processor.filter_options(&response, &criteria4);
     //     assert_eq!(results4.len(), 1);
     //     assert_eq!(results4[0].hotel_id, "hotel3");
-    //     
+    //
     //     // Test 5: Combined filters
     //     let criteria5 = FilterCriteria {
     //         max_price: Some(300.0),
@@ -958,7 +1026,7 @@ mod tests {
     //         hotel_ids: None,
     //         room_type_contains: Some("Suite".to_string()),
     //     };
-    //     
+    //
     //     let results5 = processor.filter_options(&response, &criteria5);
     //     assert_eq!(results5.len(), 1);
     //     assert_eq!(results5[0].hotel_id, "hotel3");
@@ -968,55 +1036,70 @@ mod tests {
     fn test_load_sample_response() {
         let processor = HotelSearchProcessor::new();
         let result = processor.load_sample_response();
-        assert!(result.is_ok(), "Failed to load sample XML response: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to load sample XML response: {:?}",
+            result.err()
+        );
     }
-    
+
     #[test]
     fn test_load_sample_request() {
         let processor = HotelSearchProcessor::new();
         let result = processor.load_sample_request();
-        assert!(result.is_ok(), "Failed to load sample XML request: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to load sample XML request: {:?}",
+            result.err()
+        );
     }
-    
+
     #[test]
     fn test_extract_search_params() {
         let processor = HotelSearchProcessor::new();
         let sample_xml = processor.load_sample_request().unwrap();
         let result = processor.extract_search_params(&sample_xml);
-        
-        assert!(result.is_ok(), "Failed to extract params: {:?}", result.err());
+
+        assert!(
+            result.is_ok(),
+            "Failed to extract params: {:?}",
+            result.err()
+        );
         let (currency, nationality, start_date, end_date) = result.unwrap();
         assert_eq!(currency, "GBP");
         assert_eq!(nationality, "US");
         assert_eq!(start_date, "11/06/2025");
         assert_eq!(end_date, "12/06/2025");
     }
-    
+
     // tests for xml parsing
     #[test]
     fn test_process_xml_sample() {
         let processor = HotelSearchProcessor::new();
         let sample_xml = processor.load_sample_response().unwrap();
         let result = processor.process(&sample_xml);
-        
+
         assert!(result.is_ok(), "Failed to process XML: {:?}", result.err());
         let response = result.unwrap();
-        assert!(response.total_options > 0, "Should have at least one hotel option");
+        assert!(
+            response.total_options > 0,
+            "Should have at least one hotel option"
+        );
         assert!(!response.hotels.is_empty());
     }
-    
+
     #[test]
     fn test_process_small_sample_xml() {
         let processor = HotelSearchProcessor::new();
         let result = processor.process(SMALL_SAMPLE_XML);
-        
+
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.hotels.len(), 1);
         assert_eq!(response.hotels[0].hotel_id, "39776757");
         assert_eq!(response.hotels[0].hotel_name, "Days Inn By Wyndham Fargo");
     }
-    
+
     #[test]
     fn test_filter_options_by_price() {
         let processor = HotelSearchProcessor::new();
@@ -1030,7 +1113,10 @@ mod tests {
                     room_type: "Standard".to_string(),
                     room_description: "Standard room".to_string(),
                     board_type: "RO".to_string(),
-                    price: Price { amount: 100.0, currency: "USD".to_string() },
+                    price: Price {
+                        amount: 100.0,
+                        currency: "USD".to_string(),
+                    },
                     cancellation_policies: vec![],
                     payment_type: "MerchantPay".to_string(),
                     is_refundable: true,
@@ -1042,7 +1128,10 @@ mod tests {
                     room_type: "Deluxe".to_string(),
                     room_description: "Deluxe room".to_string(),
                     board_type: "BB".to_string(),
-                    price: Price { amount: 200.0, currency: "USD".to_string() },
+                    price: Price {
+                        amount: 200.0,
+                        currency: "USD".to_string(),
+                    },
                     cancellation_policies: vec![],
                     payment_type: "MerchantPay".to_string(),
                     is_refundable: false,
@@ -1054,7 +1143,10 @@ mod tests {
                     room_type: "Suite".to_string(),
                     room_description: "Suite room".to_string(),
                     board_type: "HB".to_string(),
-                    price: Price { amount: 300.0, currency: "USD".to_string() },
+                    price: Price {
+                        amount: 300.0,
+                        currency: "USD".to_string(),
+                    },
                     cancellation_policies: vec![],
                     payment_type: "MerchantPay".to_string(),
                     is_refundable: true,
@@ -1066,7 +1158,7 @@ mod tests {
             check_in: "2025-06-01".to_string(),
             check_out: "2025-06-05".to_string(),
         };
-        
+
         let criteria = FilterCriteria {
             max_price: Some(150.0),
             board_types: None,
@@ -1074,12 +1166,12 @@ mod tests {
             hotel_ids: None,
             room_type_contains: None,
         };
-        
+
         let filtered = processor.filter_options(&response, &criteria);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].hotel_id, "1");
     }
-    
+
     #[test]
     fn test_filter_options_by_board_type() {
         let processor = HotelSearchProcessor::new();
@@ -1093,7 +1185,10 @@ mod tests {
                     room_type: "Standard".to_string(),
                     room_description: "Standard".to_string(),
                     board_type: "RO".to_string(),
-                    price: Price { amount: 100.0, currency: "USD".to_string() },
+                    price: Price {
+                        amount: 100.0,
+                        currency: "USD".to_string(),
+                    },
                     cancellation_policies: vec![],
                     payment_type: "MerchantPay".to_string(),
                     is_refundable: true,
@@ -1105,7 +1200,10 @@ mod tests {
                     room_type: "Deluxe".to_string(),
                     room_description: "Deluxe".to_string(),
                     board_type: "BB".to_string(),
-                    price: Price { amount: 200.0, currency: "USD".to_string() },
+                    price: Price {
+                        amount: 200.0,
+                        currency: "USD".to_string(),
+                    },
                     cancellation_policies: vec![],
                     payment_type: "MerchantPay".to_string(),
                     is_refundable: true,
@@ -1117,7 +1215,7 @@ mod tests {
             check_in: "2025-06-01".to_string(),
             check_out: "2025-06-05".to_string(),
         };
-        
+
         let criteria = FilterCriteria {
             max_price: None,
             board_types: Some(vec!["BB".to_string()]),
@@ -1125,7 +1223,7 @@ mod tests {
             hotel_ids: None,
             room_type_contains: None,
         };
-        
+
         let filtered = processor.filter_options(&response, &criteria);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].board_type, "BB");
