@@ -412,6 +412,11 @@ impl CircuitBreaker {
 #[async_trait]
 impl ApiClient for BookingApiClient {
     async fn search(&self, request: SearchRequest) -> Result<SearchResponse, ApiError> {
+        // check if paused
+        if self.paused.load(Ordering::Relaxed) {
+            return Err(ApiError::Other("Client is paused".to_string()));
+        }
+
         // generate request_id and store correlation_id mapping
         let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
         let correlation_id = request.context.correlation_id.clone();
@@ -554,6 +559,11 @@ impl ApiClient for BookingApiClient {
     }
 
     async fn book(&self, request: BookingRequest) -> Result<BookingResponse, ApiError> {
+        // check if paused
+        if self.paused.load(Ordering::Relaxed) {
+            return Err(ApiError::Other("Client is paused".to_string()));
+        }
+
         // generate request_id and store correlation_id mapping
         let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
         let correlation_id = request.context.correlation_id.clone();
@@ -805,6 +815,9 @@ impl ApiClient for BookingApiClient {
     }
 
     async fn pause(&self, drain: bool) -> Result<(), ClientError> {
+        // set paused flag
+        self.paused.store(true, Ordering::Relaxed);
+
         if drain {
             loop {
                 let queue = self.request_queue.lock().await;
@@ -819,7 +832,8 @@ impl ApiClient for BookingApiClient {
     }
 
     async fn resume(&self) -> Result<(), ClientError> {
-        // resume processing
+        // clear paused flag
+        self.paused.store(false, Ordering::Relaxed);
         Ok(())
     }
 
