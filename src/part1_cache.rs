@@ -96,24 +96,99 @@ impl AvailabilityCache for ShardedCache {
         data: Vec<u8>,
         ttl: Option<Duration>,
     ) -> bool {
+        let start_time = Instant::now();
         let key = create_cache_key(hotel_id, check_in, check_out);
         let shard_index = self.get_shard_index(&key);
         let shard = &self.shards[shard_index];
         
-        // implemnt store logic
-        false
+        let ttl = ttl.unwrap_or_else(|| Duration::from_secs(self.config.default_ttl_seconds));
+        let item_size = calculate_item_size(&key, &data);
+        let max_size_bytes = self.config.max_size_mb * 1024 * 1024;
+        
+        let mut shard_guard = shard.write();
+        let mut stats_guard = self.stats.write();
+        
+        let current_size: usize = shard_guard.values().map(|e| e.size_bytes).sum();
+        
+        if current_size + item_size > max_size_bytes {
+            stats_guard.rejected_count += 1;
+            return false;
+        }
+        
+        let entry = CacheEntry {
+            data,
+            created_at: Instant::now(),
+            ttl,
+            access_count: 0,
+            last_accessed: Instant::now(),
+            size_bytes: item_size,
+        };
+        
+        shard_guard.insert(key, entry);
+        stats_guard.items_count += 1;
+        stats_guard.size_bytes += item_size;
+        
+        let lookup_time = start_time.elapsed().as_nanos() as u64;
+        stats_guard.total_lookups += 1;
+        if stats_guard.total_lookups > 0 {
+            stats_guard.average_lookup_time_ns = 
+                (stats_guard.average_lookup_time_ns * (stats_guard.total_lookups - 1) as u64 + lookup_time) / stats_guard.total_lookups as u64;
+        }
+        
+        true
     }
 
     fn get(&self, hotel_id: &str, check_in: &str, check_out: &str) -> Option<(Vec<u8>, bool)> {
+        let start_time = Instant::now();
         let key = create_cache_key(hotel_id, check_in, check_out);
         let shard_index = self.get_shard_index(&key);
         let shard = &self.shards[shard_index];
         
-        None
+        let mut shard_guard = shard.write();
+        let mut stats_guard = self.stats.write();
+        
+        stats_guard.total_lookups += 1;
+        
+        if let Some(entry) = shard_guard.get_mut(&key) {
+            if entry.is_expired() {
+                shard_guard.remove(&key);
+                stats_guard.expired_count += 1;
+                stats_guard.miss_count += 1;
+                return None;
+            }
+            
+            entry.access_count += 1;
+            entry.last_accessed = Instant::now();
+            stats_guard.hit_count += 1;
+            
+            let lookup_time = start_time.elapsed().as_nanos() as u64;
+            if stats_guard.total_lookups > 0 {
+                stats_guard.average_lookup_time_ns = 
+                    (stats_guard.average_lookup_time_ns * (stats_guard.total_lookups - 1) as u64 + lookup_time) / stats_guard.total_lookups as u64;
+            }
+            
+            Some((entry.data.clone(), true))
+        } else {
+            stats_guard.miss_count += 1;
+            None
+        }
     }
 
     fn stats(&self) -> CacheStats {
-        self.stats.read().clone()
+        let mut stats = self.stats.read().clone();
+        
+        // update stats from all shards
+        let mut total_items = 0;
+        let mut total_size = 0;
+        for shard in &self.shards {
+            let shard_guard = shard.read();
+            total_items += shard_guard.len();
+            total_size += shard_guard.values().map(|e| e.size_bytes).sum::<usize>();
+        }
+        stats.items_count = total_items;
+        stats.size_bytes = total_size;
+        
+        stats
     }
 
     fn set_eviction_policy(&self, policy: EvictionPolicy) {
