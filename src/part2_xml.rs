@@ -325,11 +325,53 @@ impl HotelSearchProcessor {
         }
     }
     
-    // Extract search parameters from the XML request
-    pub fn extract_search_params(&self, _request_xml: &str) -> Result<(String, String, String, String), ProcessingError> {
-        // TODO: Implement this to extract currency, nationality, start_date, end_date
-        // This would be implemented in a real solution using quick-xml
-        Err(ProcessingError::Other("Not implemented".to_string()))
+    // extract params from request xml
+    pub fn extract_search_params(&self, request_xml: &str) -> Result<(String, String, String, String), ProcessingError> {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        
+        let mut reader = Reader::from_str(request_xml);
+        reader.trim_text(true);
+        
+        let mut currency = String::new();
+        let mut nationality = String::new();
+        let mut start_date = String::new();
+        let mut end_date = String::new();
+        let mut buf = Vec::new();
+        let mut current_tag: Option<Vec<u8>> = None;
+        
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    current_tag = Some(e.name().as_ref().to_vec());
+                }
+                Ok(Event::Text(e)) => {
+                    if let Some(ref tag) = current_tag {
+                        let text = e.unescape().unwrap_or_default().to_string();
+                        match tag.as_slice() {
+                            b"Currency" => currency = text,
+                            b"Nationality" => nationality = text,
+                            b"StartDate" => start_date = text,
+                            b"EndDate" => end_date = text,
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(Event::End(_)) => {
+                    current_tag = None;
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {}", e))),
+                _ => {}
+            }
+            buf.clear();
+        }
+        
+        if currency.is_empty() || nationality.is_empty() || start_date.is_empty() || end_date.is_empty() {
+            return Err(ProcessingError::MissingRequiredField("One or more required fields missing".to_string()));
+        }
+        
+        Ok((currency, nationality, start_date, end_date))
     }
 }
 
@@ -648,5 +690,19 @@ mod tests {
         let processor = HotelSearchProcessor::new();
         let result = processor.load_sample_request();
         assert!(result.is_ok(), "Failed to load sample XML request: {:?}", result.err());
+    }
+    
+    #[test]
+    fn test_extract_search_params() {
+        let processor = HotelSearchProcessor::new();
+        let sample_xml = processor.load_sample_request().unwrap();
+        let result = processor.extract_search_params(&sample_xml);
+        
+        assert!(result.is_ok(), "Failed to extract params: {:?}", result.err());
+        let (currency, nationality, start_date, end_date) = result.unwrap();
+        assert_eq!(currency, "GBP");
+        assert_eq!(nationality, "US");
+        assert_eq!(start_date, "11/06/2025");
+        assert_eq!(end_date, "12/06/2025");
     }
 }
