@@ -132,6 +132,26 @@ impl ShardedCache {
         
         evicted_size
     }
+    
+    fn evict_expired(&self, shard: &Arc<RwLock<ShardData>>) -> usize {
+        let mut shard_guard = shard.write();
+        let mut evicted_count = 0;
+        let keys_to_remove: Vec<String> = shard_guard.entries
+            .iter()
+            .filter(|(_, entry)| entry.is_expired())
+            .map(|(key, _)| key.clone())
+            .collect();
+        
+        for key in keys_to_remove {
+            if let Some(entry) = shard_guard.entries.remove(&key) {
+                shard_guard.lru_order.retain(|k| k != &key);
+                shard_guard.lfu_frequencies.remove(&key);
+                evicted_count += 1;
+            }
+        }
+        
+        evicted_count
+    }
 }
 
 impl AvailabilityCache for ShardedCache {
@@ -177,9 +197,10 @@ impl AvailabilityCache for ShardedCache {
                 EvictionPolicy::LeastRecentlyUsed => self.evict_lru(shard, item_size),
                 EvictionPolicy::LeastFrequentlyUsed => self.evict_lfu(shard, item_size),
                 EvictionPolicy::TimeToLive => {
-                    // TTL eviction handled separately
-                    stats_guard.rejected_count += 1;
-                    return false;
+                    // evict expired items first
+                    self.evict_expired(shard);
+                    // then try lru as fallback
+                    self.evict_lru(shard, item_size)
                 }
             };
             if evicted > 0 {
