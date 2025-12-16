@@ -397,7 +397,7 @@ impl CircuitBreaker {
 #[async_trait]
 impl ApiClient for BookingApiClient {
     async fn search(&self, request: SearchRequest) -> Result<SearchResponse, ApiError> {
-        // throttleing with token bucket
+        // throttling with token bucket
         if !self.token_bucket.acquire(1).await {
             let mut stats = self.stats.lock().await;
             stats.requests_throttled += 1;
@@ -484,10 +484,99 @@ impl ApiClient for BookingApiClient {
         Err(last_error.unwrap_or_else(|| ApiError::Other("Request failed".to_string())))
     }
 
-    async fn book(&self, _request: BookingRequest) -> Result<BookingResponse, ApiError> {
-        // TODO: Implement with higher priority than search requests
-        // Bookings should be able to preempt search requests when needed
-        Err(ApiError::Other("Not implemented".to_string()))
+    async fn book(&self, request: BookingRequest) -> Result<BookingResponse, ApiError> {
+        // bookings have higher priority - bypass some rate limits
+        if !self.token_bucket.acquire(1).await {
+            // try to preempt lower priority requests
+            let mut queue = self.request_queue.lock().await;
+            if let Some(low_priority) = queue.peek() {
+                if low_priority.priority < RequestPriority::High {
+                    queue.pop();
+                    let mut stats = self.stats.lock().await;
+                    stats.requests_preempted += 1;
+                    drop(stats);
+                }
+            }
+            drop(queue);
+            
+            if !self.token_bucket.acquire(1).await {
+                let mut stats = self.stats.lock().await;
+                stats.requests_throttled += 1;
+                return Err(ApiError::RateLimitExceeded("Rate limit exceeded".to_string()));
+            }
+        }
+        
+        let mut cb = self.circuit_breaker.lock().await;
+        if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+            return Err(ApiError::CircuitBreakerOpen {
+                service_name: "booking_api".to_string(),
+                retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
+            });
+        }
+        drop(cb);
+        
+        let mut stats = self.stats.lock().await;
+        stats.requests_sent += 1;
+        drop(stats);
+        
+        // retry logic similar to search
+        for attempt in 0..=self.config.retry_config.max_retries {
+            let backoff = BookingApiClient::calculate_backoff(attempt, &self.config.retry_config);
+            if attempt > 0 {
+                sleep(backoff).await;
+            }
+            
+            match self.http_client
+                .post(&format!("{}/book", self.config.base_url))
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .json(&request)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let result: BookingResponse = response.json().await
+                            .map_err(|e| ApiError::NetworkError(e.to_string()))?;
+                        
+                        let mut stats = self.stats.lock().await;
+                        stats.requests_succeeded += 1;
+                        let mut cb = self.circuit_breaker.lock().await;
+                        cb.record_success();
+                        drop(cb);
+                        drop(stats);
+                        
+                        return Ok(result);
+                    } else if response.status().is_server_error() && attempt < self.config.retry_config.max_retries {
+                        continue;
+                    } else {
+                        return Err(ApiError::ApiResponseError {
+                            status_code: response.status().as_u16(),
+                            message: "Booking failed".to_string(),
+                            is_retryable: false,
+                        });
+                    }
+                }
+                Err(e) => {
+                    if attempt < self.config.retry_config.max_retries {
+                        let mut stats = self.stats.lock().await;
+                        stats.requests_retried += 1;
+                        drop(stats);
+                        continue;
+                    } else {
+                        return Err(ApiError::NetworkError(e.to_string()));
+                    }
+                }
+            }
+        }
+        
+        let mut stats = self.stats.lock().await;
+        stats.requests_failed += 1;
+        let mut cb = self.circuit_breaker.lock().await;
+        cb.record_failure(&self.config.circuit_breaker_config);
+        drop(cb);
+        drop(stats);
+        
+        Err(ApiError::Other("Booking failed".to_string()))
     }
 
     fn stats(&self) -> ClientStats {
