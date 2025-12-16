@@ -53,6 +53,7 @@ pub struct ShardedCache {
 struct ShardData {
     entries: HashMap<String, CacheEntry>,
     lru_order: Vec<String>,
+    lfu_frequencies: HashMap<String, usize>,
 }
 
 struct CacheEntry {
@@ -75,6 +76,7 @@ impl ShardData {
         Self {
             entries: HashMap::new(),
             lru_order: Vec::new(),
+            lfu_frequencies: HashMap::new(),
         }
     }
 }
@@ -94,7 +96,37 @@ impl ShardedCache {
             if let Some(key) = shard_guard.lru_order.pop() {
                 if let Some(entry) = shard_guard.entries.remove(&key) {
                     evicted_size += entry.size_bytes;
+                    shard_guard.lfu_frequencies.remove(&key);
                 }
+            }
+        }
+        
+        evicted_size
+    }
+    
+    fn evict_lfu(&self, shard: &Arc<RwLock<ShardData>>, needed_size: usize) -> usize {
+        let mut shard_guard = shard.write();
+        let mut evicted_size = 0;
+        
+        while evicted_size < needed_size && !shard_guard.entries.is_empty() {
+            let mut min_freq = usize::MAX;
+            let mut min_key = None;
+            
+            for (key, freq) in &shard_guard.lfu_frequencies {
+                if *freq < min_freq {
+                    min_freq = *freq;
+                    min_key = Some(key.clone());
+                }
+            }
+            
+            if let Some(key) = min_key {
+                if let Some(entry) = shard_guard.entries.remove(&key) {
+                    evicted_size += entry.size_bytes;
+                    shard_guard.lfu_frequencies.remove(&key);
+                    shard_guard.lru_order.retain(|k| k != &key);
+                }
+            } else {
+                break;
             }
         }
         
@@ -141,8 +173,16 @@ impl AvailabilityCache for ShardedCache {
         
         if current_size + item_size > max_size_bytes {
             let policy = *self.eviction_policy.read();
-            if policy == EvictionPolicy::LeastRecentlyUsed {
-                let evicted = self.evict_lru(shard, item_size);
+            let evicted = match policy {
+                EvictionPolicy::LeastRecentlyUsed => self.evict_lru(shard, item_size),
+                EvictionPolicy::LeastFrequentlyUsed => self.evict_lfu(shard, item_size),
+                EvictionPolicy::TimeToLive => {
+                    // TTL eviction handled separately
+                    stats_guard.rejected_count += 1;
+                    return false;
+                }
+            };
+            if evicted > 0 {
                 stats_guard.eviction_count += 1;
                 stats_guard.size_bytes -= evicted;
             } else {
@@ -161,7 +201,8 @@ impl AvailabilityCache for ShardedCache {
         };
         
         shard_guard.entries.insert(key.clone(), entry);
-        shard_guard.lru_order.insert(0, key);
+        shard_guard.lru_order.insert(0, key.clone());
+        shard_guard.lfu_frequencies.insert(key, 0);
         stats_guard.items_count += 1;
         stats_guard.size_bytes += item_size;
         
@@ -204,6 +245,9 @@ impl AvailabilityCache for ShardedCache {
             // update lru order
             shard_guard.lru_order.retain(|k| k != &key);
             shard_guard.lru_order.insert(0, key.clone());
+            
+            // update lfu frequency
+            *shard_guard.lfu_frequencies.entry(key.clone()).or_insert(0) += 1;
             
             stats_guard.hit_count += 1;
             
