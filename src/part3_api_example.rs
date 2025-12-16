@@ -21,38 +21,44 @@ impl ApiClient for ExampleBookingApiClient {
         {
             let mut last_time = self.last_request_time.lock().unwrap();
             let mut count = self.request_count.lock().unwrap();
-            
+
             let now = Instant::now();
             if let Some(last) = *last_time {
-                if now.duration_since(last) < Duration::from_millis(1000 / self.config.max_requests_per_second as u64) {
-                    return Err(ApiError::RateLimitExceeded("Rate limit exceeded".to_string()));
+                if now.duration_since(last)
+                    < Duration::from_millis(1000 / self.config.max_requests_per_second as u64)
+                {
+                    return Err(ApiError::RateLimitExceeded(
+                        "Rate limit exceeded".to_string(),
+                    ));
                 }
             }
-            
+
             *last_time = Some(now);
             *count += 1;
         }
-        
+
         // Simulate network delay
         sleep(Duration::from_millis(50)).await;
-        
+
         // Update stats
         {
             let mut stats = self.stats.lock().unwrap();
             stats.requests_sent += 1;
             stats.requests_succeeded += 1;
         }
-        
+
         // Create mock response
-        let results = request.hotel_ids.into_iter().map(|hotel_id| {
-            SearchResult {
+        let results = request
+            .hotel_ids
+            .into_iter()
+            .map(|hotel_id| SearchResult {
                 hotel_id,
                 available: true,
                 price: Some(100.0),
                 currency: Some("USD".to_string()),
-            }
-        }).collect();
-        
+            })
+            .collect();
+
         Ok(SearchResponse {
             search_id: format!("search_{}", rand::random::<u32>()),
             results,
@@ -60,18 +66,18 @@ impl ApiClient for ExampleBookingApiClient {
             processing_time_ms: 50,
         })
     }
-    
+
     async fn book(&self, request: BookingRequest) -> Result<BookingResponse, ApiError> {
         // Bookings have higher priority - bypass some rate limits
         sleep(Duration::from_millis(100)).await;
-        
+
         // Update stats
         {
             let mut stats = self.stats.lock().unwrap();
             stats.requests_sent += 1;
             stats.requests_succeeded += 1;
         }
-        
+
         Ok(BookingResponse {
             booking_id: format!("booking_{}", rand::random::<u32>()),
             status: "confirmed".to_string(),
@@ -80,11 +86,11 @@ impl ApiClient for ExampleBookingApiClient {
             processing_time_ms: 100,
         })
     }
-    
+
     fn stats(&self) -> ClientStats {
         self.stats.lock().unwrap().clone()
     }
-    
+
     async fn set_system_health(&self, health: SystemHealth) -> f64 {
         match health {
             SystemHealth::Healthy => 1.0,
@@ -92,27 +98,27 @@ impl ApiClient for ExampleBookingApiClient {
             SystemHealth::Unhealthy => 0.2,
         }
     }
-    
+
     async fn cancel_request(&self, _correlation_id: &str) -> bool {
         // Simple implementation - always return false (not found)
         false
     }
-    
+
     async fn update_config(&self, _config: ClientConfig) -> Result<(), ClientError> {
         // Simple implementation - just return success
         Ok(())
     }
-    
+
     async fn pause(&self, _drain: bool) -> Result<(), ClientError> {
         // Simple implementation
         Ok(())
     }
-    
+
     async fn resume(&self) -> Result<(), ClientError> {
         // Simple implementation
         Ok(())
     }
-    
+
     async fn reset_circuit_breakers(&self) -> usize {
         // Simple implementation - return 0 (no circuit breakers reset)
         0
@@ -148,9 +154,9 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = ExampleBookingApiClient::new(config).await.unwrap();
-        
+
         let request = SearchRequest {
             hotel_ids: vec!["hotel1".to_string(), "hotel2".to_string()],
             check_in: "2025-06-01".to_string(),
@@ -163,20 +169,20 @@ mod tests {
                 ..Default::default()
             },
         };
-        
+
         let result = client.search(request).await;
         assert!(result.is_ok());
-        
+
         let response = result.unwrap();
         assert_eq!(response.results.len(), 2);
         assert!(response.search_id.starts_with("search_"));
-        
+
         // Check stats
         let stats = client.stats();
         assert_eq!(stats.requests_sent, 1);
         assert_eq!(stats.requests_succeeded, 1);
     }
-    
+
     #[tokio::test]
     async fn test_example_booking() {
         let config = ClientConfig {
@@ -191,9 +197,9 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = ExampleBookingApiClient::new(config).await.unwrap();
-        
+
         let request = BookingRequest {
             search_id: "search_123".to_string(),
             hotel_id: "hotel1".to_string(),
@@ -211,16 +217,16 @@ mod tests {
                 ..Default::default()
             },
         };
-        
+
         let result = client.book(request).await;
         assert!(result.is_ok());
-        
+
         let response = result.unwrap();
         assert!(response.booking_id.starts_with("booking_"));
         assert_eq!(response.status, "confirmed");
         assert!(response.confirmation_code.is_some());
     }
-    
+
     #[tokio::test]
     async fn test_example_rate_limiting() {
         let config = ClientConfig {
@@ -235,9 +241,9 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = ExampleBookingApiClient::new(config).await.unwrap();
-        
+
         let request = SearchRequest {
             hotel_ids: vec!["hotel1".to_string()],
             check_in: "2025-06-01".to_string(),
@@ -250,15 +256,15 @@ mod tests {
                 ..Default::default()
             },
         };
-        
+
         // First request should succeed
         let result1 = client.search(request.clone()).await;
         assert!(result1.is_ok());
-        
+
         // Second request immediately should be rate limited
         let result2 = client.search(request.clone()).await;
         assert!(result2.is_err());
-        
+
         if let Err(ApiError::RateLimitExceeded(_)) = result2 {
             // Expected
         } else {

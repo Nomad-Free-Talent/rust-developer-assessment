@@ -2,14 +2,14 @@
 // This component is our customer-facing API that must handle extreme traffic while maintaining reliability
 
 use async_trait::async_trait;
+use reqwest::Client as HttpClient;
+use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
-use tokio::time::{Instant as TokioInstant, sleep};
-use std::collections::BinaryHeap;
-use reqwest::Client as HttpClient;
+use tokio::time::{sleep, Instant as TokioInstant};
 
 // Enhanced error types for API client
 #[derive(Error, Debug)]
@@ -116,7 +116,9 @@ impl Default for CircuitBreakerConfig {
 }
 
 // Request priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum RequestPriority {
     Low = 0,
     Medium = 1,
@@ -316,12 +318,12 @@ impl TokenBucket {
             last_refill: Arc::new(Mutex::new(TokioInstant::now())),
         }
     }
-    
+
     async fn acquire(&self, tokens_needed: u32) -> bool {
         let mut last_refill = self.last_refill.lock().await;
         let now = TokioInstant::now();
         let elapsed = now.duration_since(*last_refill).as_secs_f64();
-        
+
         let tokens_to_add = (elapsed * self.refill_rate) as u32;
         if tokens_to_add > 0 {
             let current = self.tokens.load(Ordering::Relaxed);
@@ -329,13 +331,22 @@ impl TokenBucket {
             self.tokens.store(new_tokens, Ordering::Relaxed);
             *last_refill = now;
         }
-        
+
         loop {
             let current = self.tokens.load(Ordering::Relaxed);
             if current < tokens_needed {
                 return false;
             }
-            if self.tokens.compare_exchange(current, current - tokens_needed, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            if self
+                .tokens
+                .compare_exchange(
+                    current,
+                    current - tokens_needed,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -362,27 +373,29 @@ impl CircuitBreaker {
             last_failure_time: None,
         }
     }
-    
+
     fn record_success(&mut self) {
         self.failures = 0;
         self.state = CircuitState::Closed;
     }
-    
+
     fn record_failure(&mut self, config: &CircuitBreakerConfig) {
         self.failures += 1;
         self.last_failure_time = Some(TokioInstant::now());
-        
+
         if self.failures >= config.failure_threshold as usize {
             self.state = CircuitState::Open;
         }
     }
-    
+
     async fn can_attempt(&mut self, config: &CircuitBreakerConfig) -> bool {
         match self.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
                 if let Some(last_failure) = self.last_failure_time {
-                    if TokioInstant::now().duration_since(last_failure).as_millis() as u64 >= config.reset_timeout_ms {
+                    if TokioInstant::now().duration_since(last_failure).as_millis() as u64
+                        >= config.reset_timeout_ms
+                    {
                         self.state = CircuitState::HalfOpen;
                         return true;
                     }
@@ -401,9 +414,11 @@ impl ApiClient for BookingApiClient {
         if !self.token_bucket.acquire(1).await {
             let mut stats = self.stats.lock().await;
             stats.requests_throttled += 1;
-            return Err(ApiError::RateLimitExceeded("Rate limit exceeded".to_string()));
+            return Err(ApiError::RateLimitExceeded(
+                "Rate limit exceeded".to_string(),
+            ));
         }
-        
+
         let mut cb = self.circuit_breaker.lock().await;
         if !cb.can_attempt(&self.config.circuit_breaker_config).await {
             return Err(ApiError::CircuitBreakerOpen {
@@ -412,11 +427,11 @@ impl ApiClient for BookingApiClient {
             });
         }
         drop(cb);
-        
+
         let mut stats = self.stats.lock().await;
         stats.requests_sent += 1;
         drop(stats);
-        
+
         // retry logic
         let mut last_error = None;
         for attempt in 0..=self.config.retry_config.max_retries {
@@ -424,8 +439,9 @@ impl ApiClient for BookingApiClient {
             if attempt > 0 {
                 sleep(backoff).await;
             }
-            
-            match self.http_client
+
+            match self
+                .http_client
                 .post(&format!("{}/search", self.config.base_url))
                 .header("Authorization", format!("Bearer {}", self.config.api_key))
                 .json(&request)
@@ -434,18 +450,22 @@ impl ApiClient for BookingApiClient {
             {
                 Ok(response) => {
                     if response.status().is_success() {
-                        let result: SearchResponse = response.json().await
+                        let result: SearchResponse = response
+                            .json()
+                            .await
                             .map_err(|e| ApiError::NetworkError(e.to_string()))?;
-                        
+
                         let mut stats = self.stats.lock().await;
                         stats.requests_succeeded += 1;
                         let mut cb = self.circuit_breaker.lock().await;
                         cb.record_success();
                         drop(cb);
                         drop(stats);
-                        
+
                         return Ok(result);
-                    } else if response.status().is_server_error() && attempt < self.config.retry_config.max_retries {
+                    } else if response.status().is_server_error()
+                        && attempt < self.config.retry_config.max_retries
+                    {
                         last_error = Some(ApiError::ApiResponseError {
                             status_code: response.status().as_u16(),
                             message: "Server error".to_string(),
@@ -473,14 +493,14 @@ impl ApiClient for BookingApiClient {
                 }
             }
         }
-        
+
         let mut stats = self.stats.lock().await;
         stats.requests_failed += 1;
         let mut cb = self.circuit_breaker.lock().await;
         cb.record_failure(&self.config.circuit_breaker_config);
         drop(cb);
         drop(stats);
-        
+
         Err(last_error.unwrap_or_else(|| ApiError::Other("Request failed".to_string())))
     }
 
@@ -498,14 +518,16 @@ impl ApiClient for BookingApiClient {
                 }
             }
             drop(queue);
-            
+
             if !self.token_bucket.acquire(1).await {
                 let mut stats = self.stats.lock().await;
                 stats.requests_throttled += 1;
-                return Err(ApiError::RateLimitExceeded("Rate limit exceeded".to_string()));
+                return Err(ApiError::RateLimitExceeded(
+                    "Rate limit exceeded".to_string(),
+                ));
             }
         }
-        
+
         let mut cb = self.circuit_breaker.lock().await;
         if !cb.can_attempt(&self.config.circuit_breaker_config).await {
             return Err(ApiError::CircuitBreakerOpen {
@@ -514,19 +536,20 @@ impl ApiClient for BookingApiClient {
             });
         }
         drop(cb);
-        
+
         let mut stats = self.stats.lock().await;
         stats.requests_sent += 1;
         drop(stats);
-        
+
         // retry logic similar to search
         for attempt in 0..=self.config.retry_config.max_retries {
             let backoff = BookingApiClient::calculate_backoff(attempt, &self.config.retry_config);
             if attempt > 0 {
                 sleep(backoff).await;
             }
-            
-            match self.http_client
+
+            match self
+                .http_client
                 .post(&format!("{}/book", self.config.base_url))
                 .header("Authorization", format!("Bearer {}", self.config.api_key))
                 .json(&request)
@@ -535,18 +558,22 @@ impl ApiClient for BookingApiClient {
             {
                 Ok(response) => {
                     if response.status().is_success() {
-                        let result: BookingResponse = response.json().await
+                        let result: BookingResponse = response
+                            .json()
+                            .await
                             .map_err(|e| ApiError::NetworkError(e.to_string()))?;
-                        
+
                         let mut stats = self.stats.lock().await;
                         stats.requests_succeeded += 1;
                         let mut cb = self.circuit_breaker.lock().await;
                         cb.record_success();
                         drop(cb);
                         drop(stats);
-                        
+
                         return Ok(result);
-                    } else if response.status().is_server_error() && attempt < self.config.retry_config.max_retries {
+                    } else if response.status().is_server_error()
+                        && attempt < self.config.retry_config.max_retries
+                    {
                         continue;
                     } else {
                         return Err(ApiError::ApiResponseError {
@@ -568,14 +595,14 @@ impl ApiClient for BookingApiClient {
                 }
             }
         }
-        
+
         let mut stats = self.stats.lock().await;
         stats.requests_failed += 1;
         let mut cb = self.circuit_breaker.lock().await;
         cb.record_failure(&self.config.circuit_breaker_config);
         drop(cb);
         drop(stats);
-        
+
         Err(ApiError::Other("Booking failed".to_string()))
     }
 
@@ -591,16 +618,16 @@ impl ApiClient for BookingApiClient {
             SystemHealth::Degraded => 0.6,
             SystemHealth::Unhealthy => 0.2,
         };
-        
+
         // update token bucket refill rate
         let new_rate = (self.config.max_requests_per_second as f64) * multiplier;
         // note: token bucket refill rate update would need to be implemented
-        
+
         let mut stats = self.stats.lock().await;
         stats.adaptive_rate_limit_multiplier = multiplier;
         stats.current_rate_limit = new_rate as u32;
         drop(stats);
-        
+
         multiplier
     }
 
@@ -653,14 +680,14 @@ impl BookingApiClient {
             config.max_burst_size,
             config.max_requests_per_second as f64,
         ));
-        
+
         let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new()));
-        
+
         let http_client = HttpClient::builder()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
             .map_err(|e| ClientError::InitError(e.to_string()))?;
-        
+
         Ok(Self {
             config,
             stats: Arc::new(Mutex::new(ClientStats::default())),
@@ -941,15 +968,15 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = BookingApiClient::new(config).await.unwrap();
         let multiplier = client.set_system_health(SystemHealth::Degraded).await;
         assert_eq!(multiplier, 0.6);
-        
+
         let multiplier2 = client.set_system_health(SystemHealth::Unhealthy).await;
         assert_eq!(multiplier2, 0.2);
     }
-    
+
     #[tokio::test]
     async fn test_circuit_breaker() {
         let config = ClientConfig {
@@ -969,12 +996,12 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = BookingApiClient::new(config).await.unwrap();
         let reset_count = client.reset_circuit_breakers().await;
         assert_eq!(reset_count, 1);
     }
-    
+
     #[tokio::test]
     async fn test_prioritization_and_preemption() {
         let config = ClientConfig {
@@ -989,12 +1016,12 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = BookingApiClient::new(config).await.unwrap();
         let stats = client.stats();
         assert_eq!(stats.requests_preempted, 0);
     }
-    
+
     #[tokio::test]
     async fn test_retry_with_backoff() {
         let config = ClientConfig {
@@ -1015,12 +1042,12 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let backoff1 = BookingApiClient::calculate_backoff(0, &config.retry_config);
         let backoff2 = BookingApiClient::calculate_backoff(1, &config.retry_config);
         assert!(backoff2 > backoff1);
     }
-    
+
     #[tokio::test]
     async fn test_extreme_load_handling() {
         let config = ClientConfig {
@@ -1035,7 +1062,7 @@ mod tests {
             queue_size_per_priority: 100,
             health_check_interval_ms: 30000,
         };
-        
+
         let client = BookingApiClient::new(config).await.unwrap();
         let stats = client.stats();
         assert_eq!(stats.requests_sent, 0);
