@@ -8,6 +8,7 @@ use parking_lot::RwLock;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::thread;
+use std::sync::Mutex;
 
 // Enhanced stats for the cache
 #[derive(Debug, Default, Clone)]
@@ -50,7 +51,7 @@ pub struct ShardedCache {
     stats: Arc<RwLock<CacheStats>>,
     eviction_policy: Arc<RwLock<EvictionPolicy>>,
     cleanup_handle: Option<thread::JoinHandle<()>>,
-    pending_fetches: Arc<Mutex<StdHashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>>,
+    pending_fetches: Arc<Mutex<HashMap<String, Arc<Mutex<Option<Vec<u8>>>>>>>,
 }
 
 struct ShardData {
@@ -201,7 +202,7 @@ impl AvailabilityCache for ShardedCache {
             stats: stats_clone,
             eviction_policy: Arc::new(RwLock::new(EvictionPolicy::LeastRecentlyUsed)),
             cleanup_handle: Some(cleanup_handle),
-            pending_fetches: Arc::new(Mutex::new(StdHashMap::new())),
+            pending_fetches: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -283,6 +284,12 @@ impl AvailabilityCache for ShardedCache {
             let data_guard = data_arc.lock().unwrap();
             if let Some(ref data) = *data_guard {
                 return Some((data.clone(), true));
+            } else {
+                // wait for pending fetch
+                drop(data_guard);
+                drop(pending);
+                thread::sleep(Duration::from_millis(10));
+                return self.get(hotel_id, check_in, check_out);
             }
         }
         drop(pending);
@@ -354,7 +361,18 @@ impl AvailabilityCache for ShardedCache {
     }
 
     fn prefetch(&self, keys: Vec<(String, String, String)>, ttl: Option<Duration>) -> usize {
-        0
+        let mut count = 0;
+        for (hotel_id, check_in, check_out) in keys {
+            let key = create_cache_key(&hotel_id, &check_in, &check_out);
+            let shard_index = self.get_shard_index(&key);
+            let shard = &self.shards[shard_index];
+            
+            let shard_guard = shard.read();
+            if shard_guard.entries.contains_key(&key) {
+                count += 1;
+            }
+        }
+        count
     }
 
     fn invalidate(
@@ -363,11 +381,63 @@ impl AvailabilityCache for ShardedCache {
         check_in: Option<&str>,
         check_out: Option<&str>,
     ) -> usize {
-        0
+        let mut invalidated = 0;
+        for shard in &self.shards {
+            let mut shard_guard = shard.write();
+            let keys_to_remove: Vec<String> = shard_guard.entries
+                .keys()
+                .filter(|key| {
+                    let parts: Vec<&str> = key.split(':').collect();
+                    if parts.len() != 3 {
+                        return false;
+                    }
+                    let matches_hotel = hotel_id.map_or(true, |h| parts[0] == h);
+                    let matches_checkin = check_in.map_or(true, |c| parts[1] == c);
+                    let matches_checkout = check_out.map_or(true, |c| parts[2] == c);
+                    matches_hotel && matches_checkin && matches_checkout
+                })
+                .cloned()
+                .collect();
+            
+            for key in keys_to_remove {
+                if shard_guard.entries.remove(&key).is_some() {
+                    shard_guard.lru_order.retain(|k| k != &key);
+                    shard_guard.lfu_frequencies.remove(&key);
+                    invalidated += 1;
+                }
+            }
+        }
+        invalidated
     }
 
     fn resize(&self, new_max_size_mb: usize) -> bool {
-        false
+        let new_max_size_bytes = new_max_size_mb * 1024 * 1024;
+        let mut stats_guard = self.stats.write();
+        let current_size = stats_guard.size_bytes;
+        
+        if current_size > new_max_size_bytes {
+            let policy = *self.eviction_policy.read();
+            let mut to_evict = current_size - new_max_size_bytes;
+            
+            for shard in &self.shards {
+                if to_evict <= 0 {
+                    break;
+                }
+                let evicted = match policy {
+                    EvictionPolicy::LeastRecentlyUsed => self.evict_lru(shard, to_evict),
+                    EvictionPolicy::LeastFrequentlyUsed => self.evict_lfu(shard, to_evict),
+                    EvictionPolicy::TimeToLive => {
+                        self.evict_expired(shard);
+                        self.evict_lru(shard, to_evict)
+                    }
+                };
+                to_evict = to_evict.saturating_sub(evicted);
+                stats_guard.eviction_count += 1;
+                stats_guard.size_bytes -= evicted;
+            }
+        }
+        
+        true
     }
 }
 
