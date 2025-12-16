@@ -185,17 +185,28 @@ impl HotelSearchProcessor {
         let mut buf = Vec::new();
         
         // TODO: need to handle errors better here
+        // parse hotel data from xml
         
-        let mut current_hotel: Option<String> = None;
-        let mut current_hotel_name: Option<String> = None;
+        let mut current_hotel_id = String::new();
+        let mut current_hotel_name = String::new();
+        let mut current_board_type = String::new();
+        let mut current_price_amount = 0.0;
+        let mut current_price_currency = String::new();
+        let mut current_room_code = String::new();
+        let mut current_room_desc = String::new();
+        let mut current_search_token = String::new();
+        let mut is_refundable = true;
+        
         let mut in_hotel = false;
         let mut in_mealplan = false;
         let mut in_option = false;
         let mut in_room = false;
+        let mut current_tag: Option<Vec<u8>> = None;
         
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
+                    current_tag = Some(e.name().as_ref().to_vec());
                     match e.name().as_ref() {
                         b"Hotel" => {
                             in_hotel = true;
@@ -203,10 +214,10 @@ impl HotelSearchProcessor {
                                 if let Ok(attr) = attr {
                                     match attr.key.as_ref() {
                                         b"code" => {
-                                            current_hotel = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                            current_hotel_id = String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         b"name" => {
-                                            current_hotel_name = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                            current_hotel_name = String::from_utf8_lossy(&attr.value).to_string();
                                         }
                                         _ => {}
                                     }
@@ -215,34 +226,115 @@ impl HotelSearchProcessor {
                         }
                         b"MealPlan" => {
                             in_mealplan = true;
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    if attr.key.as_ref() == b"code" {
+                                        current_board_type = String::from_utf8_lossy(&attr.value).to_string();
+                                    }
+                                }
+                            }
                         }
                         b"Option" => {
                             in_option = true;
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    if attr.key.as_ref() == b"paymentType" {
+                                        // payment type stored but not used yet
+                                    }
+                                }
+                            }
                         }
                         b"Room" => {
                             in_room = true;
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    match attr.key.as_ref() {
+                                        b"code" => {
+                                            current_room_code = String::from_utf8_lossy(&attr.value).to_string();
+                                        }
+                                        b"description" => {
+                                            current_room_desc = String::from_utf8_lossy(&attr.value).to_string();
+                                        }
+                                        b"nonRefundable" => {
+                                            let val = String::from_utf8_lossy(&attr.value);
+                                            is_refundable = val != "true";
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        b"Price" => {
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    match attr.key.as_ref() {
+                                        b"currency" => {
+                                            current_price_currency = String::from_utf8_lossy(&attr.value).to_string();
+                                        }
+                                        b"amount" => {
+                                            let amount_str = String::from_utf8_lossy(&attr.value);
+                                            current_price_amount = amount_str.parse().unwrap_or(0.0);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
                 }
+                Ok(Event::Text(e)) => {
+                    if let Some(ref tag) = current_tag {
+                        let text = e.unescape().unwrap_or_default().to_string();
+                        match tag.as_slice() {
+                            b"Parameter" => {
+                                // will handle search_token later
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 Ok(Event::End(e)) => {
                     match e.name().as_ref() {
+                        b"Room" => {
+                            if in_room && in_option && in_mealplan && in_hotel {
+                                if !current_hotel_id.is_empty() && !current_room_code.is_empty() {
+                                    hotels.push(HotelOption {
+                                        hotel_id: current_hotel_id.clone(),
+                                        hotel_name: current_hotel_name.clone(),
+                                        room_type: current_room_code.clone(),
+                                        room_description: current_room_desc.clone(),
+                                        board_type: current_board_type.clone(),
+                                        price: Price {
+                                            amount: current_price_amount,
+                                            currency: current_price_currency.clone(),
+                                        },
+                                        cancellation_policies: Vec::new(),
+                                        payment_type: "MerchantPay".to_string(),
+                                        is_refundable,
+                                        search_token: current_search_token.clone(),
+                                    });
+                                }
+                            }
+                            in_room = false;
+                            current_room_code.clear();
+                            current_room_desc.clear();
+                        }
                         b"Hotel" => {
                             in_hotel = false;
-                            current_hotel = None;
-                            current_hotel_name = None;
+                            current_hotel_id.clear();
+                            current_hotel_name.clear();
                         }
                         b"MealPlan" => {
                             in_mealplan = false;
+                            current_board_type.clear();
                         }
                         b"Option" => {
                             in_option = false;
                         }
-                        b"Room" => {
-                            in_room = false;
-                        }
                         _ => {}
                     }
+                    current_tag = None;
                 }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {}", e))),
