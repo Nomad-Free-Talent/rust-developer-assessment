@@ -827,14 +827,9 @@ impl ApiClient for BookingApiClient {
         self.paused.store(true, Ordering::Relaxed);
 
         if drain {
-            loop {
-                let queue = self.request_queue.lock().await;
-                if queue.is_empty() {
-                    break;
-                }
-                drop(queue);
-                sleep(Duration::from_millis(100)).await;
-            }
+            // drain the queue by clearing all items
+            let mut queue = self.request_queue.lock().await;
+            queue.clear();
         }
         Ok(())
     }
@@ -1229,6 +1224,140 @@ mod tests {
         let backoff1 = BookingApiClient::calculate_backoff(0, &config.retry_config);
         let backoff2 = BookingApiClient::calculate_backoff(1, &config.retry_config);
         assert!(backoff2 > backoff1);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_request() {
+        let config = ClientConfig {
+            base_url: "https://api.test.com".to_string(),
+            api_key: "test".to_string(),
+            max_requests_per_second: 10,
+            max_burst_size: 20,
+            max_concurrent_requests: 5,
+            timeout_ms: 5000,
+            retry_config: RetryConfig::default(),
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            queue_size_per_priority: 100,
+            health_check_interval_ms: 30000,
+        };
+
+        let client = BookingApiClient::new(config).await.unwrap();
+
+        // cancel non-existent request should return false
+        let cancelled = client.cancel_request("non-existent").await;
+        assert!(!cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_update_config() {
+        let config = ClientConfig {
+            base_url: "https://api.test.com".to_string(),
+            api_key: "test".to_string(),
+            max_requests_per_second: 10,
+            max_burst_size: 20,
+            max_concurrent_requests: 5,
+            timeout_ms: 5000,
+            retry_config: RetryConfig::default(),
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            queue_size_per_priority: 100,
+            health_check_interval_ms: 30000,
+        };
+
+        let client = BookingApiClient::new(config).await.unwrap();
+
+        // update config with new values
+        let new_config = ClientConfig {
+            base_url: "https://api.new.com".to_string(),
+            api_key: "new-key".to_string(),
+            max_requests_per_second: 20,
+            max_burst_size: 40,
+            max_concurrent_requests: 10,
+            timeout_ms: 10000,
+            retry_config: RetryConfig {
+                max_retries: 5,
+                ..RetryConfig::default()
+            },
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            queue_size_per_priority: 200,
+            health_check_interval_ms: 60000,
+        };
+
+        let result = client.update_config(new_config.clone()).await;
+        assert!(result.is_ok());
+
+        // verify config was updated
+        let updated_config = {
+            let config = client.config.lock().await;
+            config.clone()
+        };
+        assert_eq!(updated_config.max_requests_per_second, 20);
+        assert_eq!(updated_config.timeout_ms, 10000);
+    }
+
+    #[tokio::test]
+    async fn test_pause_resume() {
+        let config = ClientConfig {
+            base_url: "https://api.test.com".to_string(),
+            api_key: "test".to_string(),
+            max_requests_per_second: 10,
+            max_burst_size: 20,
+            max_concurrent_requests: 5,
+            timeout_ms: 5000,
+            retry_config: RetryConfig::default(),
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            queue_size_per_priority: 100,
+            health_check_interval_ms: 30000,
+        };
+
+        let client = BookingApiClient::new(config).await.unwrap();
+
+        // pause the client
+        let result = client.pause(false).await;
+        assert!(result.is_ok());
+        assert!(client.paused.load(Ordering::Relaxed));
+
+        // resume the client
+        let result = client.resume().await;
+        assert!(result.is_ok());
+        assert!(!client.paused.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_pause_with_drain() {
+        let config = ClientConfig {
+            base_url: "https://api.test.com".to_string(),
+            api_key: "test".to_string(),
+            max_requests_per_second: 10,
+            max_burst_size: 20,
+            max_concurrent_requests: 5,
+            timeout_ms: 5000,
+            retry_config: RetryConfig::default(),
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            queue_size_per_priority: 100,
+            health_check_interval_ms: 30000,
+        };
+
+        let client = BookingApiClient::new(config).await.unwrap();
+
+        // add some items to queue
+        {
+            let mut queue = client.request_queue.lock().await;
+            queue.push(QueuedRequest {
+                priority: RequestPriority::Low,
+                request_id: "req1".to_string(),
+                timestamp: TokioInstant::now(),
+            });
+        }
+
+        // pause with drain
+        let result = client.pause(true).await;
+        assert!(result.is_ok());
+
+        // verify queue is empty and paused flag is set
+        let queue = client.request_queue.lock().await;
+        assert!(queue.is_empty());
+        drop(queue);
+        assert!(client.paused.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
