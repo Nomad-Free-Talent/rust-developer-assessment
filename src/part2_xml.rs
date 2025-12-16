@@ -184,7 +184,6 @@ impl HotelSearchProcessor {
         let mut hotels = Vec::new();
         let mut buf = Vec::new();
         
-        // TODO: need to handle errors better here
         // parse hotel data from xml
         // parse cancellaton policies
         
@@ -273,6 +272,23 @@ impl HotelSearchProcessor {
                                 }
                             }
                         }
+                        b"Parameter" => {
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    if attr.key.as_ref() == b"key" {
+                                        let key_val = String::from_utf8_lossy(&attr.value);
+                                        if key_val == "search_token" {
+                                            // will get value from next attribute
+                                        }
+                                    } else if attr.key.as_ref() == b"value" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        if val.contains('|') {
+                                            current_search_token = val.to_string();
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         b"Price" => {
                             for attr in e.attributes() {
                                 if let Ok(attr) = attr {
@@ -335,7 +351,7 @@ impl HotelSearchProcessor {
                                 }
                             }
                             b"Parameter" => {
-                                // will handle search_token later
+                                // search_token handled in Start event
                             }
                             _ => {}
                         }
@@ -403,14 +419,37 @@ impl HotelSearchProcessor {
             buf.clear();
         }
         
+        // extract metadata from search_token
+        let mut search_id = String::new();
+        let mut check_in = String::new();
+        let mut check_out = String::new();
+        let mut currency = String::new();
+        let mut nationality = String::new();
+        
+        if !current_search_token.is_empty() {
+            let parts: Vec<&str> = current_search_token.split('|').collect();
+            if parts.len() >= 6 {
+                search_id = format!("{}|{}", parts[0], parts.get(5).unwrap_or(&""));
+                check_in = parts.get(1).unwrap_or(&"").to_string();
+                check_out = parts.get(2).unwrap_or(&"").to_string();
+                nationality = parts.get(4).unwrap_or(&"").to_string();
+                currency = parts.get(5).unwrap_or(&"").to_string();
+            }
+        }
+        
+        // if currency not found, use from first hotel price
+        if currency.is_empty() && !hotels.is_empty() {
+            currency = hotels[0].price.currency.clone();
+        }
+        
         Ok(ProcessedResponse {
-            search_id: "".to_string(),
+            search_id,
             total_options: hotels.len(),
             hotels,
-            currency: "".to_string(),
-            nationality: "".to_string(),
-            check_in: "".to_string(),
-            check_out: "".to_string(),
+            currency,
+            nationality,
+            check_in,
+            check_out,
         })
     }
     
