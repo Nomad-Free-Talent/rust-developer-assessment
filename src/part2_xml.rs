@@ -164,7 +164,6 @@ pub struct FilterCriteria {
 
 // Hotel search processor to implement
 pub struct HotelSearchProcessor {
-    // Add appropriate fields here
 }
 
 impl HotelSearchProcessor {
