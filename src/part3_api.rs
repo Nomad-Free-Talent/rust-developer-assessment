@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -418,7 +418,11 @@ impl ApiClient for BookingApiClient {
         }
 
         // generate request_id and store correlation_id mapping
-        let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
+        let request_id = format!(
+            "req_{}_{}",
+            TokioInstant::now().elapsed().as_nanos(),
+            std::process::id()
+        );
         let correlation_id = request.context.correlation_id.clone();
         {
             let mut map = self.correlation_id_map.lock().await;
@@ -565,7 +569,11 @@ impl ApiClient for BookingApiClient {
         }
 
         // generate request_id and store correlation_id mapping
-        let request_id = format!("req_{}_{}", TokioInstant::now().elapsed().as_nanos(), std::process::id());
+        let request_id = format!(
+            "req_{}_{}",
+            TokioInstant::now().elapsed().as_nanos(),
+            std::process::id()
+        );
         let correlation_id = request.context.correlation_id.clone();
         {
             let mut map = self.correlation_id_map.lock().await;
