@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use reqwest::Client as HttpClient;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -272,6 +272,7 @@ pub struct BookingApiClient {
     request_queue: Arc<Mutex<BinaryHeap<QueuedRequest>>>,
     http_client: Arc<Mutex<HttpClient>>,
     correlation_id_map: Arc<Mutex<HashMap<String, String>>>,
+    paused: Arc<AtomicBool>,
 }
 
 struct QueuedRequest {
@@ -854,6 +855,7 @@ impl BookingApiClient {
             request_queue: Arc::new(Mutex::new(BinaryHeap::new())),
             http_client: Arc::new(Mutex::new(http_client)),
             correlation_id_map: Arc::new(Mutex::new(HashMap::new())),
+            paused: Arc::new(AtomicBool::new(false)),
         })
     }
 
