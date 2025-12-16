@@ -991,4 +991,143 @@ mod tests {
         assert_eq!(start_date, "11/06/2025");
         assert_eq!(end_date, "12/06/2025");
     }
+    
+    // tests for xml parsing
+    #[test]
+    fn test_process_xml_sample() {
+        let processor = HotelSearchProcessor::new();
+        let sample_xml = processor.load_sample_response().unwrap();
+        let result = processor.process(&sample_xml);
+        
+        assert!(result.is_ok(), "Failed to process XML: {:?}", result.err());
+        let response = result.unwrap();
+        assert!(response.total_options > 0, "Should have at least one hotel option");
+        assert!(!response.hotels.is_empty());
+    }
+    
+    #[test]
+    fn test_process_small_sample_xml() {
+        let processor = HotelSearchProcessor::new();
+        let result = processor.process(SMALL_SAMPLE_XML);
+        
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.hotels.len(), 1);
+        assert_eq!(response.hotels[0].hotel_id, "39776757");
+        assert_eq!(response.hotels[0].hotel_name, "Days Inn By Wyndham Fargo");
+    }
+    
+    #[test]
+    fn test_filter_options_by_price() {
+        let processor = HotelSearchProcessor::new();
+        let mut response = ProcessedResponse {
+            search_id: "test".to_string(),
+            total_options: 3,
+            hotels: vec![
+                HotelOption {
+                    hotel_id: "1".to_string(),
+                    hotel_name: "Hotel 1".to_string(),
+                    room_type: "Standard".to_string(),
+                    room_description: "Standard room".to_string(),
+                    board_type: "RO".to_string(),
+                    price: Price { amount: 100.0, currency: "USD".to_string() },
+                    cancellation_policies: vec![],
+                    payment_type: "MerchantPay".to_string(),
+                    is_refundable: true,
+                    search_token: "token1".to_string(),
+                },
+                HotelOption {
+                    hotel_id: "2".to_string(),
+                    hotel_name: "Hotel 2".to_string(),
+                    room_type: "Deluxe".to_string(),
+                    room_description: "Deluxe room".to_string(),
+                    board_type: "BB".to_string(),
+                    price: Price { amount: 200.0, currency: "USD".to_string() },
+                    cancellation_policies: vec![],
+                    payment_type: "MerchantPay".to_string(),
+                    is_refundable: false,
+                    search_token: "token2".to_string(),
+                },
+                HotelOption {
+                    hotel_id: "3".to_string(),
+                    hotel_name: "Hotel 3".to_string(),
+                    room_type: "Suite".to_string(),
+                    room_description: "Suite room".to_string(),
+                    board_type: "HB".to_string(),
+                    price: Price { amount: 300.0, currency: "USD".to_string() },
+                    cancellation_policies: vec![],
+                    payment_type: "MerchantPay".to_string(),
+                    is_refundable: true,
+                    search_token: "token3".to_string(),
+                },
+            ],
+            currency: "USD".to_string(),
+            nationality: "US".to_string(),
+            check_in: "2025-06-01".to_string(),
+            check_out: "2025-06-05".to_string(),
+        };
+        
+        let criteria = FilterCriteria {
+            max_price: Some(150.0),
+            board_types: None,
+            free_cancellation: false,
+            hotel_ids: None,
+            room_type_contains: None,
+        };
+        
+        let filtered = processor.filter_options(&response, &criteria);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].hotel_id, "1");
+    }
+    
+    #[test]
+    fn test_filter_options_by_board_type() {
+        let processor = HotelSearchProcessor::new();
+        let response = ProcessedResponse {
+            search_id: "test".to_string(),
+            total_options: 2,
+            hotels: vec![
+                HotelOption {
+                    hotel_id: "1".to_string(),
+                    hotel_name: "Hotel 1".to_string(),
+                    room_type: "Standard".to_string(),
+                    room_description: "Standard".to_string(),
+                    board_type: "RO".to_string(),
+                    price: Price { amount: 100.0, currency: "USD".to_string() },
+                    cancellation_policies: vec![],
+                    payment_type: "MerchantPay".to_string(),
+                    is_refundable: true,
+                    search_token: "token1".to_string(),
+                },
+                HotelOption {
+                    hotel_id: "2".to_string(),
+                    hotel_name: "Hotel 2".to_string(),
+                    room_type: "Deluxe".to_string(),
+                    room_description: "Deluxe".to_string(),
+                    board_type: "BB".to_string(),
+                    price: Price { amount: 200.0, currency: "USD".to_string() },
+                    cancellation_policies: vec![],
+                    payment_type: "MerchantPay".to_string(),
+                    is_refundable: true,
+                    search_token: "token2".to_string(),
+                },
+            ],
+            currency: "USD".to_string(),
+            nationality: "US".to_string(),
+            check_in: "2025-06-01".to_string(),
+            check_out: "2025-06-05".to_string(),
+        };
+        
+        let criteria = FilterCriteria {
+            max_price: None,
+            board_types: Some(vec!["BB".to_string()]),
+            free_cancellation: false,
+            hotel_ids: None,
+            room_type_contains: None,
+        };
+        
+        let filtered = processor.filter_options(&response, &criteria);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].board_type, "BB");
+    }
 }
