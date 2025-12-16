@@ -185,7 +185,7 @@ impl HotelSearchProcessor {
         let mut buf = Vec::new();
         
         // parse hotel data from xml
-        // parse cancellaton policies
+        // parse cancellation policies
         
         let mut current_hotel_id = String::new();
         let mut current_hotel_name = String::new();
@@ -455,6 +455,13 @@ impl HotelSearchProcessor {
     
     // Convert supplier JSON response to XML format
     pub fn convert_json_to_xml(&self, json_str: &str) -> Result<String, ProcessingError> {
+        fn escape_xml(s: &str) -> String {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;")
+        }
         // Parse the JSON string into SupplierResponse
         let supplier_response: SupplierResponse = match serde_json::from_str(json_str) {
             Ok(response) => response,
@@ -469,8 +476,10 @@ impl HotelSearchProcessor {
         xml.push_str("  <Hotels>\n");
         
         for hotel in &supplier_response.hotels {
-            xml.push_str(&format!("    <Hotel code=\"{}\", name=\"{}\">\n", 
-                hotel.hotel_id, hotel.name));
+            let hotel_id_escaped = escape_xml(&hotel.hotel_id);
+            let hotel_name_escaped = escape_xml(&hotel.name);
+            xml.push_str(&format!("    <Hotel code=\"{}\" name=\"{}\">\n", 
+                hotel_id_escaped, hotel_name_escaped));
             xml.push_str("      <MealPlans>\n");
             
             // Group rooms by board type
@@ -493,20 +502,23 @@ impl HotelSearchProcessor {
                 xml.push_str("              <Rooms>\n");
                 
                 for (room, rate) in room_rates {
+                    let room_id_escaped = escape_xml(&room.room_id);
+                    let room_name_escaped = escape_xml(&room.name);
                     xml.push_str(&format!("                <Room id=\"1#{}\" roomCandidateRefId=\"1\" code=\"{}\" description=\"{}\" numberOfUnits=\"1\" nonRefundable=\"false\">\n", 
-                        room.room_id, room.room_id, room.name));
+                        room_id_escaped, room_id_escaped, room_name_escaped));
                     xml.push_str(&format!("                  <Price currency=\"{}\" amount=\"{}\" binding=\"false\" commission=\"-1\" minimumSellingPrice=\"-1\"/>\n", 
-                        supplier_response.currency, rate.price));
+                        escape_xml(&supplier_response.currency), rate.price));
                     
                     if !rate.cancellation_policies.is_empty() {
                         xml.push_str("                  <CancelPenalties nonRefundable=\"false\">\n");
                         
                         for policy in &rate.cancellation_policies {
                             xml.push_str("                    <CancelPenalty>\n");
-                            xml.push_str("                      <HoursBefore>24</HoursBefore>\n"); // Simplified
+                            xml.push_str("                      <HoursBefore>24</HoursBefore>\n");
+                            let deadline_escaped = escape_xml(&policy.from_date);
                             xml.push_str(&format!("                      <Penalty type=\"Importe\" currency=\"{}\">{}</Penalty>\n", 
-                                supplier_response.currency, policy.amount));
-                            xml.push_str(&format!("                      <Deadline>{}</Deadline>\n", policy.from_date));
+                                escape_xml(&supplier_response.currency), policy.amount));
+                            xml.push_str(&format!("                      <Deadline>{}</Deadline>\n", deadline_escaped));
                             xml.push_str("                    </CancelPenalty>\n");
                         }
                         
@@ -519,7 +531,7 @@ impl HotelSearchProcessor {
                 xml.push_str("              </Rooms>\n");
                 xml.push_str("              <Parameters>\n");
                 xml.push_str(&format!("                <Parameter key=\"search_token\" value=\"{}|||||{}\"/>\n", 
-                    hotel.hotel_id, supplier_response.search_id));
+                    escape_xml(&hotel.hotel_id), escape_xml(&supplier_response.search_id)));
                 xml.push_str("              </Parameters>\n");
                 xml.push_str("            </Option>\n");
                 xml.push_str("          </Options>\n");
