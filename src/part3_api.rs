@@ -620,12 +620,13 @@ impl ApiClient for BookingApiClient {
 
     async fn pause(&self, drain: bool) -> Result<(), ClientError> {
         if drain {
-            // wait for queue to empty
-            let queue = self.request_queue.lock().await;
-            while !queue.is_empty() {
+            loop {
+                let queue = self.request_queue.lock().await;
+                if queue.is_empty() {
+                    break;
+                }
                 drop(queue);
                 sleep(Duration::from_millis(100)).await;
-                let queue = self.request_queue.lock().await;
             }
         }
         Ok(())
