@@ -265,12 +265,12 @@ pub trait ApiClient: Send + Sync + 'static {
 
 // Booking API client to implement
 pub struct BookingApiClient {
-    config: ClientConfig,
+    config: Arc<Mutex<ClientConfig>>,
     stats: Arc<Mutex<ClientStats>>,
     token_bucket: Arc<TokenBucket>,
     circuit_breaker: Arc<Mutex<CircuitBreaker>>,
     request_queue: Arc<Mutex<BinaryHeap<QueuedRequest>>>,
-    http_client: HttpClient,
+    http_client: Arc<Mutex<HttpClient>>,
     correlation_id_map: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -431,14 +431,22 @@ impl ApiClient for BookingApiClient {
             ));
         }
 
+        let cb_config = {
+            let config = self.config.lock().await;
+            config.circuit_breaker_config.clone()
+        };
         let mut cb = self.circuit_breaker.lock().await;
-        if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+        if !cb.can_attempt(&cb_config).await {
             // cleanup mapping on failure
             let mut map = self.correlation_id_map.lock().await;
             map.remove(&correlation_id);
+            let reset_timeout = {
+                let config = self.config.lock().await;
+                config.circuit_breaker_config.reset_timeout_ms
+            };
             return Err(ApiError::CircuitBreakerOpen {
                 service_name: "booking_api".to_string(),
-                retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
+                retry_after_ms: Some(reset_timeout),
             });
         }
         drop(cb);
@@ -448,17 +456,29 @@ impl ApiClient for BookingApiClient {
         drop(stats);
 
         // retry logic
+        let retry_config = {
+            let config = self.config.lock().await;
+            config.retry_config.clone()
+        };
+        let base_url = {
+            let config = self.config.lock().await;
+            config.base_url.clone()
+        };
+        let api_key = {
+            let config = self.config.lock().await;
+            config.api_key.clone()
+        };
         let mut last_error = None;
-        for attempt in 0..=self.config.retry_config.max_retries {
-            let backoff = BookingApiClient::calculate_backoff(attempt, &self.config.retry_config);
+        for attempt in 0..=retry_config.max_retries {
+            let backoff = BookingApiClient::calculate_backoff(attempt, &retry_config);
             if attempt > 0 {
                 sleep(backoff).await;
             }
 
-            match self
-                .http_client
-                .post(&format!("{}/search", self.config.base_url))
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
+            let http_client = self.http_client.lock().await;
+            match http_client
+                .post(&format!("{}/search", base_url))
+                .header("Authorization", format!("Bearer {}", api_key))
                 .json(&request)
                 .send()
                 .await
@@ -483,7 +503,7 @@ impl ApiClient for BookingApiClient {
 
                         return Ok(result);
                     } else if response.status().is_server_error()
-                        && attempt < self.config.retry_config.max_retries
+                        && attempt < retry_config.max_retries
                     {
                         last_error = Some(ApiError::ApiResponseError {
                             status_code: response.status().as_u16(),
@@ -500,7 +520,7 @@ impl ApiClient for BookingApiClient {
                     }
                 }
                 Err(e) => {
-                    if attempt < self.config.retry_config.max_retries {
+                    if attempt < retry_config.max_retries {
                         last_error = Some(ApiError::NetworkError(e.to_string()));
                         let mut stats = self.stats.lock().await;
                         stats.requests_retried += 1;
@@ -511,12 +531,17 @@ impl ApiClient for BookingApiClient {
                     }
                 }
             }
+            drop(http_client);
         }
 
         let mut stats = self.stats.lock().await;
         stats.requests_failed += 1;
         let mut cb = self.circuit_breaker.lock().await;
-        cb.record_failure(&self.config.circuit_breaker_config);
+        let cb_config = {
+            let config = self.config.lock().await;
+            config.circuit_breaker_config.clone()
+        };
+        cb.record_failure(&cb_config);
         drop(cb);
         drop(stats);
 
@@ -562,14 +587,22 @@ impl ApiClient for BookingApiClient {
             }
         }
 
+        let cb_config = {
+            let config = self.config.lock().await;
+            config.circuit_breaker_config.clone()
+        };
         let mut cb = self.circuit_breaker.lock().await;
-        if !cb.can_attempt(&self.config.circuit_breaker_config).await {
+        if !cb.can_attempt(&cb_config).await {
             // cleanup mapping on failure
             let mut map = self.correlation_id_map.lock().await;
             map.remove(&correlation_id);
+            let reset_timeout = {
+                let config = self.config.lock().await;
+                config.circuit_breaker_config.reset_timeout_ms
+            };
             return Err(ApiError::CircuitBreakerOpen {
                 service_name: "booking_api".to_string(),
-                retry_after_ms: Some(self.config.circuit_breaker_config.reset_timeout_ms),
+                retry_after_ms: Some(reset_timeout),
             });
         }
         drop(cb);
@@ -579,16 +612,28 @@ impl ApiClient for BookingApiClient {
         drop(stats);
 
         // retry logic similar to search
-        for attempt in 0..=self.config.retry_config.max_retries {
-            let backoff = BookingApiClient::calculate_backoff(attempt, &self.config.retry_config);
+        let retry_config = {
+            let config = self.config.lock().await;
+            config.retry_config.clone()
+        };
+        let base_url = {
+            let config = self.config.lock().await;
+            config.base_url.clone()
+        };
+        let api_key = {
+            let config = self.config.lock().await;
+            config.api_key.clone()
+        };
+        for attempt in 0..=retry_config.max_retries {
+            let backoff = BookingApiClient::calculate_backoff(attempt, &retry_config);
             if attempt > 0 {
                 sleep(backoff).await;
             }
 
-            match self
-                .http_client
-                .post(&format!("{}/book", self.config.base_url))
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
+            let http_client = self.http_client.lock().await;
+            match http_client
+                .post(&format!("{}/book", base_url))
+                .header("Authorization", format!("Bearer {}", api_key))
                 .json(&request)
                 .send()
                 .await
@@ -607,12 +652,19 @@ impl ApiClient for BookingApiClient {
                         drop(cb);
                         drop(stats);
 
+                        // cleanup mapping on success
+                        let mut map = self.correlation_id_map.lock().await;
+                        map.remove(&correlation_id);
+
                         return Ok(result);
                     } else if response.status().is_server_error()
-                        && attempt < self.config.retry_config.max_retries
+                        && attempt < retry_config.max_retries
                     {
                         continue;
                     } else {
+                        // cleanup mapping on failure
+                        let mut map = self.correlation_id_map.lock().await;
+                        map.remove(&correlation_id);
                         return Err(ApiError::ApiResponseError {
                             status_code: response.status().as_u16(),
                             message: "Booking failed".to_string(),
@@ -621,24 +673,36 @@ impl ApiClient for BookingApiClient {
                     }
                 }
                 Err(e) => {
-                    if attempt < self.config.retry_config.max_retries {
+                    if attempt < retry_config.max_retries {
                         let mut stats = self.stats.lock().await;
                         stats.requests_retried += 1;
                         drop(stats);
                         continue;
                     } else {
+                        // cleanup mapping on failure
+                        let mut map = self.correlation_id_map.lock().await;
+                        map.remove(&correlation_id);
                         return Err(ApiError::NetworkError(e.to_string()));
                     }
                 }
             }
+            drop(http_client);
         }
 
         let mut stats = self.stats.lock().await;
         stats.requests_failed += 1;
         let mut cb = self.circuit_breaker.lock().await;
-        cb.record_failure(&self.config.circuit_breaker_config);
+        let cb_config = {
+            let config = self.config.lock().await;
+            config.circuit_breaker_config.clone()
+        };
+        cb.record_failure(&cb_config);
         drop(cb);
         drop(stats);
+
+        // cleanup mapping on failure
+        let mut map = self.correlation_id_map.lock().await;
+        map.remove(&correlation_id);
 
         Err(ApiError::Other("Booking failed".to_string()))
     }
@@ -657,7 +721,11 @@ impl ApiClient for BookingApiClient {
         };
 
         // update token bucket refill rate
-        let new_rate = (self.config.max_requests_per_second as f64) * multiplier;
+        let max_requests = {
+            let config = self.config.lock().await;
+            config.max_requests_per_second
+        };
+        let new_rate = (max_requests as f64) * multiplier;
         // note: token bucket refill rate update would need to be implemented
 
         let mut stats = self.stats.lock().await;
@@ -700,9 +768,38 @@ impl ApiClient for BookingApiClient {
         }
     }
 
-    async fn update_config(&self, config: ClientConfig) -> Result<(), ClientError> {
+    async fn update_config(&self, new_config: ClientConfig) -> Result<(), ClientError> {
+        let old_max_requests = {
+            let config = self.config.lock().await;
+            config.max_requests_per_second
+        };
+        let old_timeout = {
+            let config = self.config.lock().await;
+            config.timeout_ms
+        };
+
         // update config
-        // note: would need interior mutability
+        {
+            let mut config = self.config.lock().await;
+            *config = new_config.clone();
+        }
+
+        // update token bucket if max_requests_per_second changed
+        if new_config.max_requests_per_second != old_max_requests {
+            // note: token bucket refill rate update would need to be implemented
+            // for now, we just update the config
+        }
+
+        // rebuild http_client if timeout changed
+        if new_config.timeout_ms != old_timeout {
+            let new_client = HttpClient::builder()
+                .timeout(Duration::from_millis(new_config.timeout_ms))
+                .build()
+                .map_err(|e| ClientError::InitError(e.to_string()))?;
+            let mut client = self.http_client.lock().await;
+            *client = new_client;
+        }
+
         Ok(())
     }
 
@@ -750,12 +847,12 @@ impl BookingApiClient {
             .map_err(|e| ClientError::InitError(e.to_string()))?;
 
         Ok(Self {
-            config,
+            config: Arc::new(Mutex::new(config)),
             stats: Arc::new(Mutex::new(ClientStats::default())),
             token_bucket,
             circuit_breaker,
             request_queue: Arc::new(Mutex::new(BinaryHeap::new())),
-            http_client,
+            http_client: Arc::new(Mutex::new(http_client)),
             correlation_id_map: Arc::new(Mutex::new(HashMap::new())),
         })
     }
