@@ -174,9 +174,92 @@ impl HotelSearchProcessor {
     
     // Process an XML hotel search response and extract key information
     // The response can be large (1MB+) and should be processed efficiently
-    pub fn process(&self, _xml: &str) -> Result<ProcessedResponse, ProcessingError> {
-        // TODO: Implement this to parse XML response
-        Err(ProcessingError::Other("Not implemented".to_string()))
+    pub fn process(&self, xml: &str) -> Result<ProcessedResponse, ProcessingError> {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        
+        let mut reader = Reader::from_str(xml);
+        reader.trim_text(true);
+        
+        let mut hotels = Vec::new();
+        let mut buf = Vec::new();
+        
+        // TODO: need to handle errors better here
+        
+        let mut current_hotel: Option<String> = None;
+        let mut current_hotel_name: Option<String> = None;
+        let mut in_hotel = false;
+        let mut in_mealplan = false;
+        let mut in_option = false;
+        let mut in_room = false;
+        
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    match e.name().as_ref() {
+                        b"Hotel" => {
+                            in_hotel = true;
+                            for attr in e.attributes() {
+                                if let Ok(attr) = attr {
+                                    match attr.key.as_ref() {
+                                        b"code" => {
+                                            current_hotel = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                        }
+                                        b"name" => {
+                                            current_hotel_name = Some(String::from_utf8_lossy(&attr.value).to_string());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        b"MealPlan" => {
+                            in_mealplan = true;
+                        }
+                        b"Option" => {
+                            in_option = true;
+                        }
+                        b"Room" => {
+                            in_room = true;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    match e.name().as_ref() {
+                        b"Hotel" => {
+                            in_hotel = false;
+                            current_hotel = None;
+                            current_hotel_name = None;
+                        }
+                        b"MealPlan" => {
+                            in_mealplan = false;
+                        }
+                        b"Option" => {
+                            in_option = false;
+                        }
+                        b"Room" => {
+                            in_room = false;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {}", e))),
+                _ => {}
+            }
+            buf.clear();
+        }
+        
+        Ok(ProcessedResponse {
+            search_id: "".to_string(),
+            total_options: hotels.len(),
+            hotels,
+            currency: "".to_string(),
+            nationality: "".to_string(),
+            check_in: "".to_string(),
+            check_out: "".to_string(),
+        })
     }
     
     // Convert supplier JSON response to XML format
