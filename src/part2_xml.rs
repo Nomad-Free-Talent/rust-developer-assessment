@@ -165,6 +165,12 @@ pub struct FilterCriteria {
 // Hotel search processor to implement
 pub struct HotelSearchProcessor {}
 
+impl Default for HotelSearchProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HotelSearchProcessor {
     // Create a new processor
     pub fn new() -> Self {
@@ -217,62 +223,54 @@ impl HotelSearchProcessor {
                     match e.name().as_ref() {
                         b"Hotel" => {
                             in_hotel = true;
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    match attr.key.as_ref() {
-                                        b"code" => {
-                                            current_hotel_id =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        b"name" => {
-                                            current_hotel_name =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        _ => {}
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"code" => {
+                                        current_hotel_id =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
+                                    b"name" => {
+                                        current_hotel_name =
+                                            String::from_utf8_lossy(&attr.value).to_string();
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                         b"MealPlan" => {
                             in_mealplan = true;
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    if attr.key.as_ref() == b"code" {
-                                        current_board_type =
-                                            String::from_utf8_lossy(&attr.value).to_string();
-                                    }
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"code" {
+                                    current_board_type =
+                                        String::from_utf8_lossy(&attr.value).to_string();
                                 }
                             }
                         }
                         b"Option" => {
                             in_option = true;
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    if attr.key.as_ref() == b"paymentType" {
-                                        // payment type stored but not used yet
-                                    }
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"paymentType" {
+                                    // payment type stored but not used yet
                                 }
                             }
                         }
                         b"Room" => {
                             in_room = true;
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    match attr.key.as_ref() {
-                                        b"code" => {
-                                            current_room_code =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        b"description" => {
-                                            current_room_desc =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        b"nonRefundable" => {
-                                            let val = String::from_utf8_lossy(&attr.value);
-                                            is_refundable = val != "true";
-                                        }
-                                        _ => {}
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"code" => {
+                                        current_room_code =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
+                                    b"description" => {
+                                        current_room_desc =
+                                            String::from_utf8_lossy(&attr.value).to_string();
+                                    }
+                                    b"nonRefundable" => {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        is_refundable = val != "true";
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -293,20 +291,18 @@ impl HotelSearchProcessor {
                             }
                         }
                         b"Price" => {
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    match attr.key.as_ref() {
-                                        b"currency" => {
-                                            current_price_currency =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        b"amount" => {
-                                            let amount_str = String::from_utf8_lossy(&attr.value);
-                                            current_price_amount =
-                                                amount_str.parse().unwrap_or(0.0);
-                                        }
-                                        _ => {}
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"currency" => {
+                                        current_price_currency =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
+                                    b"amount" => {
+                                        let amount_str = String::from_utf8_lossy(&attr.value);
+                                        current_price_amount =
+                                            amount_str.parse().unwrap_or(0.0);
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -319,19 +315,17 @@ impl HotelSearchProcessor {
                             current_deadline.clear();
                         }
                         b"Penalty" => {
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    match attr.key.as_ref() {
-                                        b"type" => {
-                                            current_penalty_type =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        b"currency" => {
-                                            current_penalty_currency =
-                                                String::from_utf8_lossy(&attr.value).to_string();
-                                        }
-                                        _ => {}
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"type" => {
+                                        current_penalty_type =
+                                            String::from_utf8_lossy(&attr.value).to_string();
                                     }
+                                    b"currency" => {
+                                        current_penalty_currency =
+                                            String::from_utf8_lossy(&attr.value).to_string();
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -379,25 +373,28 @@ impl HotelSearchProcessor {
                             in_cancel_penalty = false;
                         }
                         b"Room" => {
-                            if in_room && in_option && in_mealplan && in_hotel {
-                                if !current_hotel_id.is_empty() && !current_room_code.is_empty() {
-                                    hotels.push(HotelOption {
-                                        hotel_id: current_hotel_id.clone(),
-                                        hotel_name: current_hotel_name.clone(),
-                                        room_type: current_room_code.clone(),
-                                        room_description: current_room_desc.clone(),
-                                        board_type: current_board_type.clone(),
-                                        price: Price {
-                                            amount: current_price_amount,
-                                            currency: current_price_currency.clone(),
-                                        },
-                                        cancellation_policies: current_cancellation_policies
-                                            .clone(),
-                                        payment_type: "MerchantPay".to_string(),
-                                        is_refundable,
-                                        search_token: current_search_token.clone(),
-                                    });
-                                }
+                            if in_room
+                                && in_option
+                                && in_mealplan
+                                && in_hotel
+                                && !current_hotel_id.is_empty()
+                                && !current_room_code.is_empty()
+                            {
+                                hotels.push(HotelOption {
+                                    hotel_id: current_hotel_id.clone(),
+                                    hotel_name: current_hotel_name.clone(),
+                                    room_type: current_room_code.clone(),
+                                    room_description: current_room_desc.clone(),
+                                    board_type: current_board_type.clone(),
+                                    price: Price {
+                                        amount: current_price_amount,
+                                        currency: current_price_currency.clone(),
+                                    },
+                                    cancellation_policies: current_cancellation_policies.clone(),
+                                    payment_type: "MerchantPay".to_string(),
+                                    is_refundable,
+                                    search_token: current_search_token.clone(),
+                                });
                             }
                             in_room = false;
                             current_room_code.clear();
@@ -421,12 +418,7 @@ impl HotelSearchProcessor {
                     current_tag = None;
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => {
-                    return Err(ProcessingError::XmlParseError(format!(
-                        "Parse error: {}",
-                        e
-                    )))
-                }
+                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {e}"))),
                 _ => {}
             }
             buf.clear();
@@ -492,8 +484,7 @@ impl HotelSearchProcessor {
             let hotel_id_escaped = escape_xml(&hotel.hotel_id);
             let hotel_name_escaped = escape_xml(&hotel.name);
             xml.push_str(&format!(
-                "    <Hotel code=\"{}\" name=\"{}\">\n",
-                hotel_id_escaped, hotel_name_escaped
+                "    <Hotel code=\"{hotel_id_escaped}\" name=\"{hotel_name_escaped}\">\n"
             ));
             xml.push_str("      <MealPlans>\n");
 
@@ -510,7 +501,7 @@ impl HotelSearchProcessor {
             }
 
             for (board_type, room_rates) in board_types {
-                xml.push_str(&format!("        <MealPlan code=\"{}\">\n", board_type));
+                xml.push_str(&format!("        <MealPlan code=\"{board_type}\">\n"));
                 xml.push_str("          <Options>\n");
                 xml.push_str("            <Option type=\"Hotel\" paymentType=\"MerchantPay\" status=\"OK\">\n");
                 xml.push_str(&format!("              <Price currency=\"{}\" amount=\"{}\" binding=\"false\" commission=\"-1\" minimumSellingPrice=\"-1\"/>\n", 
@@ -520,8 +511,7 @@ impl HotelSearchProcessor {
                 for (room, rate) in room_rates {
                     let room_id_escaped = escape_xml(&room.room_id);
                     let room_name_escaped = escape_xml(&room.name);
-                    xml.push_str(&format!("                <Room id=\"1#{}\" roomCandidateRefId=\"1\" code=\"{}\" description=\"{}\" numberOfUnits=\"1\" nonRefundable=\"false\">\n", 
-                        room_id_escaped, room_id_escaped, room_name_escaped));
+                    xml.push_str(&format!("                <Room id=\"1#{room_id_escaped}\" roomCandidateRefId=\"1\" code=\"{room_id_escaped}\" description=\"{room_name_escaped}\" numberOfUnits=\"1\" nonRefundable=\"false\">\n"));
                     xml.push_str(&format!("                  <Price currency=\"{}\" amount=\"{}\" binding=\"false\" commission=\"-1\" minimumSellingPrice=\"-1\"/>\n", 
                         escape_xml(&supplier_response.currency), rate.price));
 
@@ -537,8 +527,7 @@ impl HotelSearchProcessor {
                             xml.push_str(&format!("                      <Penalty type=\"Importe\" currency=\"{}\">{}</Penalty>\n", 
                                 escape_xml(&supplier_response.currency), policy.amount));
                             xml.push_str(&format!(
-                                "                      <Deadline>{}</Deadline>\n",
-                                deadline_escaped
+                                "                      <Deadline>{deadline_escaped}</Deadline>\n"
                             ));
                             xml.push_str("                    </CancelPenalty>\n");
                         }
@@ -594,24 +583,24 @@ impl HotelSearchProcessor {
             // Apply filters
             let price_ok = criteria
                 .max_price
-                .map_or(true, |max| hotel.price.amount <= max);
+                .is_none_or(|max| hotel.price.amount <= max);
 
             let board_type_ok = criteria
                 .board_types
                 .as_ref()
-                .map_or(true, |types| types.contains(&hotel.board_type));
+                .is_none_or(|types| types.contains(&hotel.board_type));
 
             let cancellation_ok = !criteria.free_cancellation || hotel.is_refundable;
 
             let hotel_id_ok = criteria
                 .hotel_ids
                 .as_ref()
-                .map_or(true, |ids| ids.contains(&hotel.hotel_id));
+                .is_none_or(|ids| ids.contains(&hotel.hotel_id));
 
             let room_type_ok = criteria
                 .room_type_contains
                 .as_ref()
-                .map_or(true, |substring| hotel.room_type.contains(substring));
+                .is_none_or(|substring| hotel.room_type.contains(substring));
 
             if price_ok && board_type_ok && cancellation_ok && hotel_id_ok && room_type_ok {
                 filtered.push(hotel.clone());
@@ -684,12 +673,7 @@ impl HotelSearchProcessor {
                     current_tag = None;
                 }
                 Ok(Event::Eof) => break,
-                Err(e) => {
-                    return Err(ProcessingError::XmlParseError(format!(
-                        "Parse error: {}",
-                        e
-                    )))
-                }
+                Err(e) => return Err(ProcessingError::XmlParseError(format!("Parse error: {e}"))),
                 _ => {}
             }
             buf.clear();
@@ -1103,7 +1087,7 @@ mod tests {
     #[test]
     fn test_filter_options_by_price() {
         let processor = HotelSearchProcessor::new();
-        let mut response = ProcessedResponse {
+        let response = ProcessedResponse {
             search_id: "test".to_string(),
             total_options: 3,
             hotels: vec![

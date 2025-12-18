@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::sync::Arc;
 use std::thread;
-use travel_tech_assessment::part1_cache::{AvailabilityCache, CacheConfig, CacheStats};
+use travel_tech_assessment::part1_cache::{AvailabilityCache, CacheConfig};
 use travel_tech_assessment::part1_cache_example::ExampleCache;
 
 // Benchmark for the cache implementation
@@ -32,12 +32,12 @@ pub fn cache_benchmark(c: &mut Criterion) {
                     let data = (0..data_size).map(|_| rng.gen::<u8>()).collect::<Vec<_>>();
 
                     // Create hotel IDs and dates
-                    let hotel_ids = (0..100).map(|i| format!("hotel{}", i)).collect::<Vec<_>>();
+                    let hotel_ids = (0..100).map(|i| format!("hotel{i}")).collect::<Vec<_>>();
                     let check_ins = (1..30)
-                        .map(|i| format!("2025-06-{:02}", i))
+                        .map(|i| format!("2025-06-{i:02}"))
                         .collect::<Vec<_>>();
                     let check_outs = (2..31)
-                        .map(|i| format!("2025-06-{:02}", i))
+                        .map(|i| format!("2025-06-{i:02}"))
                         .collect::<Vec<_>>();
 
                     // Spawn multiple threads to simulate concurrent access

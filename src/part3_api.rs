@@ -117,19 +117,23 @@ impl Default for CircuitBreakerConfig {
 
 // Request priority levels
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    Default,
 )]
 pub enum RequestPriority {
     Low = 0,
+    #[default]
     Medium = 1,
     High = 2,
     Critical = 3,
-}
-
-impl Default for RequestPriority {
-    fn default() -> Self {
-        RequestPriority::Medium
-    }
 }
 
 // Enhanced client statistics
@@ -487,8 +491,8 @@ impl ApiClient for BookingApiClient {
 
             let http_client = self.http_client.lock().await;
             match http_client
-                .post(&format!("{}/search", base_url))
-                .header("Authorization", format!("Bearer {}", api_key))
+                .post(format!("{base_url}/search"))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .json(&request)
                 .send()
                 .await
@@ -537,7 +541,8 @@ impl ApiClient for BookingApiClient {
                         drop(stats);
                         continue;
                     } else {
-                        return Err(ApiError::NetworkError(e.to_string()));
+                        // store error for post-loop handling
+                        last_error = Some(ApiError::NetworkError(e.to_string()));
                     }
                 }
             }
@@ -643,6 +648,7 @@ impl ApiClient for BookingApiClient {
             let config = self.config.lock().await;
             config.api_key.clone()
         };
+        let mut last_error = None;
         for attempt in 0..=retry_config.max_retries {
             let backoff = BookingApiClient::calculate_backoff(attempt, &retry_config);
             if attempt > 0 {
@@ -651,8 +657,8 @@ impl ApiClient for BookingApiClient {
 
             let http_client = self.http_client.lock().await;
             match http_client
-                .post(&format!("{}/book", base_url))
-                .header("Authorization", format!("Bearer {}", api_key))
+                .post(format!("{base_url}/book"))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .json(&request)
                 .send()
                 .await
@@ -681,10 +687,8 @@ impl ApiClient for BookingApiClient {
                     {
                         continue;
                     } else {
-                        // cleanup mapping on failure
-                        let mut map = self.correlation_id_map.lock().await;
-                        map.remove(&correlation_id);
-                        return Err(ApiError::ApiResponseError {
+                        // non-retryable error on final attempt - store for post-loop handling
+                        last_error = Some(ApiError::ApiResponseError {
                             status_code: response.status().as_u16(),
                             message: "Booking failed".to_string(),
                             is_retryable: false,
@@ -698,10 +702,8 @@ impl ApiClient for BookingApiClient {
                         drop(stats);
                         continue;
                     } else {
-                        // cleanup mapping on failure
-                        let mut map = self.correlation_id_map.lock().await;
-                        map.remove(&correlation_id);
-                        return Err(ApiError::NetworkError(e.to_string()));
+                        // store error for post-loop handling
+                        last_error = Some(ApiError::NetworkError(e.to_string()));
                     }
                 }
             }
@@ -723,7 +725,7 @@ impl ApiClient for BookingApiClient {
         let mut map = self.correlation_id_map.lock().await;
         map.remove(&correlation_id);
 
-        Err(ApiError::Other("Booking failed".to_string()))
+        Err(last_error.unwrap_or_else(|| ApiError::Other("Booking failed".to_string())))
     }
 
     fn stats(&self) -> ClientStats {
@@ -896,7 +898,7 @@ pub mod mock_server {
     use super::*;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+
     use std::time::Instant;
     use tokio::sync::Mutex;
 
@@ -920,6 +922,12 @@ pub mod mock_server {
         rate_limit_window_ms: AtomicUsize,
         recent_requests: Mutex<Vec<(Instant, String)>>,
         dropped_request_count: AtomicUsize,
+    }
+
+    impl Default for MockServer {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl MockServer {
@@ -1014,8 +1022,7 @@ pub mod mock_server {
             if recent.len() >= limit {
                 self.dropped_request_count.fetch_add(1, Ordering::SeqCst);
                 return Err(ApiError::RateLimitExceeded(format!(
-                    "Rate limit of {} requests per {}ms exceeded",
-                    limit, window_ms
+                    "Rate limit of {limit} requests per {window_ms}ms exceeded"
                 )));
             }
 
@@ -1128,9 +1135,6 @@ pub mod mock_server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mock_server::{MockServer, ServerMode};
-    use std::sync::Arc;
-    use std::time::Instant;
 
     #[tokio::test]
     async fn test_adaptive_rate_limiting() {

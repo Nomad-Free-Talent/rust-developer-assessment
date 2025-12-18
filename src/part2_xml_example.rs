@@ -5,6 +5,12 @@ use crate::part2_xml::*;
 
 pub struct ExampleHotelSearchProcessor;
 
+impl Default for ExampleHotelSearchProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExampleHotelSearchProcessor {
     pub fn new() -> Self {
         Self

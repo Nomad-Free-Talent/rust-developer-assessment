@@ -430,7 +430,7 @@ impl AvailabilityCache for ShardedCache {
             let mut to_evict = current_size - new_max_size_bytes;
 
             for shard in &self.shards {
-                if to_evict <= 0 {
+                if to_evict == 0 {
                     break;
                 }
                 let evicted = match policy {

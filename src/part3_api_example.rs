@@ -67,7 +67,7 @@ impl ApiClient for ExampleBookingApiClient {
         })
     }
 
-    async fn book(&self, request: BookingRequest) -> Result<BookingResponse, ApiError> {
+    async fn book(&self, _request: BookingRequest) -> Result<BookingResponse, ApiError> {
         // Bookings have higher priority - bypass some rate limits
         sleep(Duration::from_millis(100)).await;
 
